@@ -1,0 +1,21 @@
+{
+  "name": "demo-postgres-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "pondhouse",
+    "database.password": "pondhouse",
+    "database.dbname": "demo",
+    "topic.prefix": "demo",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_demo",
+    "table.include.list": "public.*",
+    "schema.history.internal.kafka.topic": "schema-changes.demo",
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter.schemas.enable": "true"
+  }
+}

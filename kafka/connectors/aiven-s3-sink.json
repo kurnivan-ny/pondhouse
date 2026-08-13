@@ -1,0 +1,20 @@
+{
+  "name": "rustfs-cdc-landing",
+  "config": {
+    "connector.class": "io.aiven.kafka.connect.s3.AivenKafkaConnectS3SinkConnector",
+    "topics.regex": "demo\\..*",
+    "aws.access.key.id": "pondhouse",
+    "aws.secret.access.key": "pondhouse-secret-change-me",
+    "aws.s3.endpoint": "http://rustfs:9000",
+    "aws.s3.region": "us-east-1",
+    "aws.s3.bucket.name": "cdc-landing",
+    "aws.s3.prefix": "cdc",
+    "input.format": "json",
+    "format.output.type": "parquet",
+    "file.name.template": "{{topic}}/{{partition}}/{{start_offset:padding=true}}.parquet",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter.schemas.enable": "true"
+  }
+}

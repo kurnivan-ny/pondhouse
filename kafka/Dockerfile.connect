@@ -1,0 +1,12 @@
+# Kafka Connect image: Debezium source connectors + Aiven S3 sink connector
+# (Aiven sink = Apache 2.0, unlike Confluent's community-licensed sink)
+FROM alpine:3.20 AS plugins
+ARG AIVEN_S3_VERSION=3.2.0
+# If the build 404s, grab the latest version number from:
+# https://github.com/Aiven-Open/s3-connector-for-apache-kafka/releases
+ADD https://github.com/Aiven-Open/s3-connector-for-apache-kafka/releases/download/v${AIVEN_S3_VERSION}/s3-connector-for-apache-kafka-${AIVEN_S3_VERSION}.zip /tmp/s3.zip
+RUN unzip /tmp/s3.zip -d /tmp \
+    && mv /tmp/s3-connector-for-apache-kafka-${AIVEN_S3_VERSION} /aiven-s3-sink
+
+FROM debezium/connect:3.0
+COPY --from=plugins /aiven-s3-sink /kafka/connect/aiven-s3-sink

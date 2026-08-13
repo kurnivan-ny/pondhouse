@@ -1,0 +1,339 @@
+# ============================================================================
+# pondhouse — lean lakehouse platform
+#
+#   storage:  RustFS (S3) + Delta Lake
+#   ingest:   Sling (batch) · Debezium -> Kafka(KRaft) -> Aiven S3 sink (CDC)
+#   compute:  DuckDB via SQLMesh + Ibis
+#   serving:  ClickHouse    · viz: Metabase    · orchestration: Dagster
+#   monitor:  Beszel        · governance: OpenMetadata
+#
+# Quickstart:
+#   docker compose up -d                       # core stack
+#   docker compose --profile cdc up -d         # + Kafka Connect (Debezium/Aiven)
+#   docker compose --profile tools up -d       # + Sling CLI container
+#   docker compose --profile monitoring up -d  # + Beszel (hub + agent)
+#   docker compose --profile governance up -d  # + OpenMetadata + Elasticsearch
+# ============================================================================
+
+name: pondhouse
+
+services:
+
+  # ---------------- Storage: RustFS (S3) ----------------
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: pondhouse-rustfs
+    environment:
+      # rustfs admin credentials (minio-compatible)
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # web console
+    volumes:
+      - rustfs-data:/data
+
+  createbuckets:
+    image: minio/mc:latest
+    container_name: pondhouse-createbuckets
+    depends_on:
+      - rustfs
+    env_file: .env
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}"; do
+          echo "waiting for rustfs..."; sleep 2;
+        done
+        mc mb --ignore-existing rustfs/lake
+        mc mb --ignore-existing rustfs/cdc-landing
+        echo "buckets ready"
+    restart: "no"
+
+  # ---------------- Kafka (KRaft mode, no ZooKeeper) ----------------
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: pondhouse-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "29092:29092"  # host access (from WSL: localhost:29092)
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  # ------------- Kafka Connect: Debezium + Aiven S3 sink (profile: cdc) -------------
+  connect:
+    build:
+      context: ./kafka
+      dockerfile: Dockerfile.connect
+    container_name: pondhouse-connect
+    profiles: ["cdc"]
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: pondhouse-connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+
+  # ---------------- ClickHouse (serving layer) ----------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    container_name: pondhouse-clickhouse
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+    ports:
+      - "8123:8123"    # HTTP (Metabase / SQLMesh / Ibis connect here)
+      - "9009:9000"    # native TCP (9000 is taken by RustFS)
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./serving/initdb:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # -------- Postgres: Dagster/OM/Airflow storage + demo CDC source --------
+  postgres:
+    image: postgres:16
+    container_name: pondhouse-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command: postgres -c wal_level=logical
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./orchestration/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------- Metabase ----------------
+  metabase:
+    image: metabase/metabase:latest
+    container_name: pondhouse-metabase
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase-data:/metabase-data
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+
+  # ---------------- Dagster ----------------
+  dagster-webserver:
+    build: ./orchestration
+    container_name: pondhouse-dagster-webserver
+    command: dagster-webserver -h 0.0.0.0 -p 3001 -w workspace.yaml
+    ports:
+      - "3001:3001"
+    env_file: .env
+    volumes:
+      - dagster-home:/opt/dagster/dagster_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dagster-daemon:
+    build: ./orchestration
+    container_name: pondhouse-dagster-daemon
+    command: dagster-daemon run -w workspace.yaml
+    env_file: .env
+    volumes:
+      - dagster-home:/opt/dagster/dagster_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------- Sling CLI (profile: tools) ----------------
+  # usage: docker compose --profile tools exec sling sling run ...
+  sling:
+    image: slingdataio/sling:latest
+    container_name: pondhouse-sling
+    profiles: ["tools"]
+    env_file: .env
+    volumes:
+      - ./ingestion/sling:/sling
+    working_dir: /sling
+    entrypoint: ["sleep", "infinity"]
+
+  # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
+  beszel:
+    image: henrygd/beszel:latest
+    container_name: pondhouse-beszel
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "8090:8090"    # web UI
+    volumes:
+      - beszel-data:/beszel_data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets the hub reach the agent
+
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: pondhouse-beszel-agent
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    network_mode: host   # accurate host CPU/RAM/net/disk stats
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      LISTEN: 45876
+      KEY: ${BESZEL_AGENT_KEY}   # public key from Beszel UI -> Add System
+
+  # ------------- Governance: OpenMetadata (profile: governance) -------------
+  # Adapted from the official OpenMetadata 1.13.3 Postgres compose; uses the
+  # shared postgres service (users/dbs in orchestration/initdb/01_dbs.sql).
+  # Requires vm.max_map_count=262144 on the host (see README -> Governance).
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.3.0
+    container_name: pondhouse-elasticsearch
+    profiles: ["governance"]
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep status | grep -qE 'green|yellow' || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  openmetadata-migrate:
+    image: docker.getcollate.io/openmetadata/server:${OM_VERSION}
+    container_name: pondhouse-openmetadata-migrate
+    profiles: ["governance"]
+    command: "./bootstrap/openmetadata-ops.sh migrate"
+    environment: &om-env
+      # database (shared pondhouse postgres)
+      DB_DRIVER_CLASS: org.postgresql.Driver
+      DB_SCHEME: postgresql
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: openmetadata_user
+      DB_USER_PASSWORD: openmetadata_password
+      OM_DATABASE: openmetadata_db
+      # elasticsearch
+      ELASTICSEARCH_HOST: elasticsearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_SCHEME: http
+      ELASTICSEARCH_USER: ""
+      ELASTICSEARCH_PASSWORD: ""
+      SEARCH_TYPE: elasticsearch
+      # pipeline service (airflow)
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: http://ingestion:8080
+      SERVER_HOST_API_URL: http://openmetadata-server:8585/api
+      AIRFLOW_USERNAME: admin
+      AIRFLOW_PASSWORD: admin
+      # auth — basic, local-dev defaults (change JWT/FERNET keys for real use)
+      AUTHENTICATION_PROVIDER: basic
+      AUTHORIZER_ADMIN_PRINCIPALS: "[admin]"
+      AUTHORIZER_INGESTION_PRINCIPALS: "[ingestion-bot]"
+      AUTHORIZER_PRINCIPAL_DOMAIN: open-metadata.org
+      JWT_ISSUER: open-metadata.org
+      JWT_KEY_ID: Gb389a-9f76-gdjs-a92j-0242bk94356
+      RSA_PUBLIC_KEY_FILE_PATH: ./conf/public_key.der
+      RSA_PRIVATE_KEY_FILE_PATH: ./conf/private_key.der
+      FERNET_KEY: jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=
+      SECRET_MANAGER: db
+      OPENMETADATA_HEAP_OPTS: -Xmx1G -Xms1G
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  openmetadata-server:
+    image: docker.getcollate.io/openmetadata/server:${OM_VERSION}
+    container_name: pondhouse-openmetadata-server
+    profiles: ["governance"]
+    restart: unless-stopped
+    environment: *om-env
+    ports:
+      - "8585:8585"    # UI + API  (login: admin@open-metadata.org / admin)
+      - "8586:8586"    # admin / healthcheck
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      openmetadata-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8586/healthcheck"]
+
+  ingestion:
+    image: docker.getcollate.io/openmetadata/ingestion:${OM_VERSION}
+    container_name: pondhouse-ingestion
+    profiles: ["governance"]
+    environment:
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: /opt/airflow/dag_generated_configs
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      AIRFLOW_DB: airflow_db
+      DB_USER: airflow_user
+      DB_SCHEME: postgresql+psycopg2
+      DB_PASSWORD: airflow_pass
+    entrypoint: /bin/bash
+    command: ["/opt/airflow/ingestion_dependency.sh"]
+    ports:
+      - "8080:8080"    # Airflow UI (admin / admin)
+    volumes:
+      - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
+      - ingestion-volume-dags:/opt/airflow/dags
+      - ingestion-volume-tmp:/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_started
+
+volumes:
+  rustfs-data:
+  kafka-data:
+  clickhouse-data:
+  postgres-data:
+  metabase-data:
+  dagster-home:
+  beszel-data:
+  es-data:
+  ingestion-volume-dag-airflow:
+  ingestion-volume-dags:
+  ingestion-volume-tmp:

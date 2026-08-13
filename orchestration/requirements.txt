@@ -1,0 +1,7 @@
+dagster
+dagster-webserver
+dagster-graphql
+dagster-postgres
+psycopg2-binary
+ibis-framework[duckdb,clickhouse]
+deltalake

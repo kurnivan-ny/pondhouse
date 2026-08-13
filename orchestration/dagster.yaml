@@ -1,0 +1,30 @@
+# Dagster instance config — keep credentials in sync with .env (POSTGRES_*)
+run_storage:
+  module: dagster_postgres.run_storage
+  class: PostgresRunStorage
+  config:
+    postgres_url: postgresql://pondhouse:pondhouse@postgres:5432/dagster
+
+event_log_storage:
+  module: dagster_postgres.event_log
+  class: PostgresEventLogStorage
+  config:
+    postgres_url: postgresql://pondhouse:pondhouse@postgres:5432/dagster
+
+schedule_storage:
+  module: dagster_postgres.schedule_storage
+  class: PostgresScheduleStorage
+  config:
+    postgres_url: postgresql://pondhouse:pondhouse@postgres:5432/dagster
+
+compute_logs:
+  module: dagster.core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
+    base_dir: /opt/dagster/dagster_home/compute_logs
+
+local_artifact_storage:
+  module: dagster.core.storage.root
+  class: LocalArtifactStorage
+  config:
+    base_dir: /opt/dagster/dagster_home/artifacts

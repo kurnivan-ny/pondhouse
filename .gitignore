@@ -1,0 +1,6 @@
+.env
+*.duckdb
+__pycache__/
+*.pyc
+cache/
+.sqlmesh/

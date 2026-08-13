@@ -1,0 +1,28 @@
+# SQLMesh project — pondhouse
+# Docs: https://sqlmesh.readthedocs.io
+
+gateways:
+  # Lake layers (bronze/silver/gold) — DuckDB engine, data on RustFS
+  lake:
+    connection:
+      type: duckdb
+      database: pondhouse_state.duckdb   # local catalog/state file (gitignored)
+      # DuckDB needs an S3 secret before it can read RustFS, e.g.:
+      #   CREATE SECRET rustfs (TYPE s3, KEY_ID 'pondhouse',
+      #     SECRET '<S3_SECRET_KEY>', ENDPOINT 'rustfs:9000',
+      #     URL_STYLE 'path', USE_SSL false);
+
+  # Serving layer — ClickHouse marts
+  serving:
+    connection:
+      type: clickhouse
+      host: localhost          # use "clickhouse" if SQLMesh runs inside the compose network
+      port: 8123
+      username: default
+      password: "{{ env_var('CLICKHOUSE_PASSWORD') }}"
+
+default_gateway: lake
+
+model_defaults:
+  dialect: duckdb
+  start: 2026-08-01

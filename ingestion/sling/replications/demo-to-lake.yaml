@@ -1,0 +1,11 @@
+# Example batch replication: demo Postgres -> bronze parquet on RustFS
+# Run: sling run -r ingestion/sling/replications/demo-to-lake.yaml
+source: DEMO_PG
+target: RUSTFS
+
+defaults:
+  mode: full-refresh
+  object: bronze/{stream_schema}_{stream_table}.parquet
+
+streams:
+  public.*:

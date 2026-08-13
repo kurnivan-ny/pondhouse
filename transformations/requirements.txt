@@ -1,0 +1,4 @@
+sqlmesh
+ibis-framework[duckdb,clickhouse]
+duckdb
+deltalake
