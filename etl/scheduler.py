@@ -1,0 +1,60 @@
+"""Scheduler: generates sample data + runs the medallion ETL on a cron.
+
+Each cycle inserts one new order (manual entry simulation) then runs
+sling migrate (oltp -> rustfs bronze) -> ibis silver/gold/mart. Cadence
+is ETL_SCHEDULE_CRON (5-field cron), default "*/5 * * * *".
+
+Usage:
+  python scheduler.py          # run forever on the configured schedule
+  python scheduler.py --once   # run a single cycle and exit
+"""
+import argparse
+import logging
+
+from apscheduler.schedulers.blocking import BlockingScheduler
+
+import db
+import etl
+import generate_data
+from config import SCHEDULE_CRON
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+
+
+def cycle():
+    conn = db.get_conn()
+    try:
+        customer_ids, products = generate_data.load_lookup(conn)
+        order_id = generate_data.insert_order(conn, customer_ids, products)
+        conn.commit()
+        logging.info("generated order %s", order_id)
+    finally:
+        conn.close()
+    etl.run_pipeline()
+    logging.info("ETL cycle complete")
+
+
+def _cron_kwargs(cron):
+    minute, hour, day, month, dow = cron.split()
+    return dict(minute=minute, hour=hour, day=day, month=month, day_of_week=dow)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true",
+                        help="run a single cycle and exit")
+    args = parser.parse_args()
+
+    if args.once:
+        cycle()
+        return
+
+    scheduler = BlockingScheduler()
+    scheduler.add_job(cycle, "cron", **_cron_kwargs(SCHEDULE_CRON))
+    logging.info("scheduler started with cron %s", SCHEDULE_CRON)
+    scheduler.start()
+
+
+if __name__ == "__main__":
+    main()

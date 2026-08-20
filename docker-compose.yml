@@ -178,10 +178,13 @@ services:
   # ---------------- Sling CLI (profile: tools) ----------------
   # usage: docker compose --profile tools exec sling sling run ...
   sling:
-    image: slingdataio/sling:latest
+    image: slingdata/sling:latest
     container_name: pondhouse-sling
     profiles: ["tools"]
+    user: "1000:1000"    # match host uid so /sling mount is writable (sling downloads duckdb to /sling/bin)
     env_file: .env
+    environment:
+      HOME: /sling        # writable home so sling can fetch its duckdb runtime
     volumes:
       - ./ingestion/sling:/sling
     working_dir: /sling

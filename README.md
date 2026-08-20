@@ -67,6 +67,7 @@ pondhouse/
 ├── docker-compose.yml      # the whole platform (core + 4 profiles)
 ├── .env                    # all credentials / config knobs (gitignored)
 ├── ingestion/sling/        # batch ingestion: connections + replication YAMLs
+├── etl/                    # demo medallion ETL: Sling (oltp->bronze) + Ibis (silver/gold/mart)
 ├── kafka/                  # Connect image (Debezium + Aiven sink) + connector JSONs
 ├── transformations/        # SQLMesh project (lake=duckdb, serving=clickhouse gateways)
 │   ├── models/             # SQL models (bronze/silver/gold)
@@ -107,6 +108,42 @@ Flow: Debezium → Kafka topics (`demo.<schema>.<table>`) → Aiven sink →
 `s3://cdc-landing/cdc/...parquet` → SQLMesh/DuckDB bronze models.
 
 The bundled Postgres doubles as a demo CDC source (database `demo`, `wal_level=logical`).
+
+## Demo ETL (Sling → Ibis)
+
+A self-contained medallion pipeline in `etl/` showing the full batch path with
+minimal duplication:
+
+```
+oltp (postgres) ──Sling──► bronze/*.parquet (RustFS) ──Ibis──► silver → gold → mart (RustFS)
+```
+
+- **`oltp`** — source tables (`customers`, `products`, `orders`, `order_items`) in the
+  `demo` database, seeded by `etl/sql/00_init.sql`.
+- **`bronze`** — raw parquet landing on RustFS, written by **Sling**
+  (`ingestion/sling/replications/demo-to-lake.yaml`, `oltp.*` → `s3://lake/bronze/{table}.parquet`).
+  Bronze lives only on the lake — there is no Postgres bronze copy (avoids duplication).
+- **`silver` / `gold` / `mart`** — cleaned, aggregated, and star-schema layers computed
+  with **Ibis** (DuckDB engine) in `etl/transform.py`, written back to `s3://lake/{layer}/…`.
+
+```bash
+cd etl
+uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
+
+.venv/bin/python etl.py --init            # seed oltp, then migrate + transform
+.venv/bin/python generate_data.py --rows 5    # insert sample orders manually
+.venv/bin/python etl.py                   # migrate (Sling) + transform (Ibis)
+.venv/bin/python scheduler.py --once      # one full cycle: generate + ETL
+.venv/bin/python scheduler.py             # run on cron (ETL_SCHEDULE_CRON, default */5 * * * *)
+```
+
+- The **scheduler** (`etl/scheduler.py`, APScheduler) inserts a new order into `oltp`
+  each cycle, then runs the whole pipeline. Cadence is `ETL_SCHEDULE_CRON`.
+- `etl/migrate.py` shells out to `docker compose --profile tools exec sling sling run …`
+  (the `tools` profile is pulled/started automatically on first run).
+- Connections/config live in `etl/config.py` and `ingestion/sling/env.yaml`
+  (defaults match `.env`). The same `oltp` tables are the demo source for the CDC
+  pipeline above.
 
 ## Transformations
 
