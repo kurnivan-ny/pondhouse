@@ -59,7 +59,9 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      # CLUSTER_ID: Generate with `uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-' | head -c 22`
+      # Or set KAFKA_CLUSTER_ID in .env for multi-instance deployments
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
@@ -114,6 +116,7 @@ services:
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./serving/initdb:/docker-entrypoint-initdb.d:ro
+      - ./serving/config.d:/etc/clickhouse-server/config.d:ro
     ulimits:
       nofile:
         soft: 262144
@@ -129,7 +132,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     command: postgres -c wal_level=logical
     ports:
-      - "5432:5432"
+      # Host port is configurable so the stack does not collide with another
+      # local Postgres. In-network services always use 5432.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./orchestration/initdb:/docker-entrypoint-initdb.d:ro
@@ -152,12 +157,23 @@ services:
 
   # ---------------- Dagster ----------------
   dagster-webserver:
-    build: ./orchestration
+    build:
+      context: .
+      dockerfile: orchestration/Dockerfile
     container_name: pondhouse-dagster-webserver
     command: dagster-webserver -h 0.0.0.0 -p 3001 -w workspace.yaml
     ports:
       - "3001:3001"
     env_file: .env
+    environment: &etl-runtime-env
+      # The assets shell out to the etl/ scripts, which address the other
+      # services by their in-network names.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      ETL_DB: demo
+      S3_ENDPOINT: http://rustfs:9000
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
     volumes:
       - dagster-home:/opt/dagster/dagster_home
     depends_on:
@@ -165,18 +181,47 @@ services:
         condition: service_healthy
 
   dagster-daemon:
-    build: ./orchestration
+    build:
+      context: .
+      dockerfile: orchestration/Dockerfile
     container_name: pondhouse-dagster-daemon
     command: dagster-daemon run -w workspace.yaml
     env_file: .env
+    environment: *etl-runtime-env
     volumes:
       - dagster-home:/opt/dagster/dagster_home
     depends_on:
       postgres:
         condition: service_healthy
 
+  # ---------------- Medallion ETL runner ----------------
+  # Runs the pipeline inside the compose network, so it addresses the other
+  # services by name (postgres / rustfs / clickhouse) rather than localhost.
+  #   docker compose run --rm etl python etl.py --ingest custom --no-serve
+  etl:
+    build: ./etl
+    image: pondhouse-etl:latest
+    container_name: pondhouse-etl
+    profiles: ["tools"]
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      ETL_DB: demo
+      S3_ENDPOINT: http://rustfs:9000
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+    volumes:
+      # serve.py reads ../serving/delta_marts.sql from the repo
+      - ./serving:/serving:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ---------------- Sling CLI (profile: tools) ----------------
   # usage: docker compose --profile tools exec sling sling run ...
+  # NOTE: Sling env.yaml doesn't support ${VAR} substitution.
+  # We generate it at container startup from environment variables.
   sling:
     image: slingdata/sling:latest
     container_name: pondhouse-sling
@@ -188,7 +233,7 @@ services:
     volumes:
       - ./ingestion/sling:/sling
     working_dir: /sling
-    entrypoint: ["sleep", "infinity"]
+    entrypoint: ["/bin/sh", "-c", "cat > /sling/env.yaml <<'EOF'\nconnections:\n  DEMO_PG:\n    type: postgres\n    host: postgres\n    port: 5432\n    user: $${POSTGRES_USER}\n    password: $${POSTGRES_PASSWORD}\n    database: demo\n  RUSTFS:\n    type: s3\n    bucket: lake\n    endpoint: http://rustfs:9000\n    access_key_id: $${S3_ACCESS_KEY}\n    secret_access_key: $${S3_SECRET_KEY}\n    region: $${S3_REGION}\nEOF\nexec sleep infinity"]
 
   # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
   beszel:

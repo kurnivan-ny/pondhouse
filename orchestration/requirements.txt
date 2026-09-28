@@ -1,7 +1,13 @@
-dagster
-dagster-webserver
-dagster-graphql
-dagster-postgres
-psycopg2-binary
-ibis-framework[duckdb,clickhouse]
-deltalake
+# Core dependencies with pinned versions for reproducibility
+dagster==1.7.7
+dagster-webserver==1.7.7
+dagster-graphql==1.7.7
+# Dagster's integration libraries use the 0.x line: 0.23.7 == core 1.7.7
+dagster-postgres==0.23.7
+psycopg2-binary==2.9.9
+ibis-framework[duckdb,clickhouse]==9.2.0
+# Must match etl/requirements.txt: ibis 9.2 uses duckdb.functional, which was
+# removed in duckdb >= 1.2 (AttributeError: module 'duckdb' has no attribute
+# 'functional' at import time).
+duckdb==1.1.3
+deltalake==0.25.1

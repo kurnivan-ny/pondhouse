@@ -1,8 +1,8 @@
 """Scheduler: generates sample data + runs the medallion ETL on a cron.
 
 Each cycle inserts one new order (manual entry simulation) then runs
-sling migrate (oltp -> rustfs bronze) -> ibis silver/gold/mart. Cadence
-is ETL_SCHEDULE_CRON (5-field cron), default "*/5 * * * *".
+ingest -> bronze -> silver -> gold -> mart. Cadence is ETL_SCHEDULE_CRON
+(5-field cron), default "*/5 * * * *".
 
 Usage:
   python scheduler.py          # run forever on the configured schedule
@@ -25,10 +25,13 @@ logging.basicConfig(level=logging.INFO,
 def cycle():
     conn = db.get_conn()
     try:
-        customer_ids, products = generate_data.load_lookup(conn)
-        order_id = generate_data.insert_order(conn, customer_ids, products)
+        customer_ids, store_ids, products = generate_data.load_lookup(conn)
+        transaction_id = generate_data.insert_transaction(conn, customer_ids, store_ids, products)
         conn.commit()
-        logging.info("generated order %s", order_id)
+        logging.info("generated transaction %s", transaction_id)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
     etl.run_pipeline()
@@ -36,7 +39,13 @@ def cycle():
 
 
 def _cron_kwargs(cron):
-    minute, hour, day, month, dow = cron.split()
+    """Parse 5-field cron expression (minute hour day month day_of_week)."""
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        raise ValueError(
+            f"Invalid cron expression (expected 5 fields, got {len(parts)}): {cron}"
+        )
+    minute, hour, day, month, dow = parts
     return dict(minute=minute, hour=hour, day=day, month=month, day_of_week=dow)
 
 
@@ -50,8 +59,14 @@ def main():
         cycle()
         return
 
+    try:
+        cron_kwargs = _cron_kwargs(SCHEDULE_CRON)
+    except ValueError as e:
+        logging.error("Invalid cron configuration: %s", e)
+        return
+
     scheduler = BlockingScheduler()
-    scheduler.add_job(cycle, "cron", **_cron_kwargs(SCHEDULE_CRON))
+    scheduler.add_job(cycle, "cron", **cron_kwargs)
     logging.info("scheduler started with cron %s", SCHEDULE_CRON)
     scheduler.start()
 

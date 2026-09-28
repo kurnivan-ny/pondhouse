@@ -1,4 +1,5 @@
-sqlmesh
-ibis-framework[duckdb,clickhouse]
-duckdb
-deltalake
+# Core dependencies with pinned versions for reproducibility
+sqlmesh==0.168.0
+ibis-framework[duckdb,clickhouse]==9.2.0
+duckdb==1.1.3
+deltalake==0.25.1

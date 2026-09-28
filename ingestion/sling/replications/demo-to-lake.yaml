@@ -1,11 +1,11 @@
-# Batch replication: demo Postgres (oltp) -> bronze parquet on RustFS
-# Run: sling run -e /sling/env.yaml -r replications/demo-to-lake.yaml
+# Batch replication: demo Postgres (pos) -> ingestion parquet on RustFS
+# Run: sling run --home-dir /sling -r replications/demo-to-lake.yaml
 source: DEMO_PG
 target: RUSTFS
 
 defaults:
   mode: full-refresh
-  object: bronze/{stream_table}.parquet
+  object: ingestion/{stream_table}.parquet
 
 streams:
-  oltp.*:
+  pos.*:

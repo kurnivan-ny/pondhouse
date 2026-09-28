@@ -10,7 +10,7 @@
     "topic.prefix": "demo",
     "plugin.name": "pgoutput",
     "slot.name": "debezium_demo",
-    "table.include.list": "public.*",
+    "table.include.list": "pos.*",
     "schema.history.internal.kafka.topic": "schema-changes.demo",
     "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",

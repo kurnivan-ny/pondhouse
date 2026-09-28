@@ -1,8 +1,9 @@
-"""Ibis transformations: silver -> gold -> mart.
+"""Ibis transformations: bronze -> silver -> gold -> mart (all Delta on RustFS).
 
-Runs on DuckDB (via Ibis), reading bronze parquet from RustFS (S3) and
-writing each layer back to RustFS as parquet. This is the "one Ibis
-expression, one engine" pattern from pondhouse/README.
+Retail medallion:
+  silver — translate (join reference lookups), cleanse, deduplicate
+  gold   — star schema (dim_* + fact_sales)
+  mart   — business-ready data marts
 
 Usage:
   python transform.py
@@ -10,162 +11,137 @@ Usage:
 import ibis
 
 from config import S3
-
-LAKE = f"s3://{S3['lake_bucket']}"
-
-
-def get_con():
-    con = ibis.duckdb.connect()
-    con.raw_sql(
-        "CREATE SECRET rustfs (TYPE s3,"
-        f" KEY_ID '{S3['access_key']}', SECRET '{S3['secret_key']}',"
-        f" ENDPOINT '{S3['endpoint']}', URL_STYLE 'path', USE_SSL false);"
-    )
-    return con
+from conn import get_conn, read_delta, write_delta
 
 
 def _read(con, layer, table):
-    view = f"{layer}_{table}"
-    con.raw_sql(
-        f"CREATE OR REPLACE VIEW {view} AS"
-        f" SELECT * FROM read_parquet('{LAKE}/{layer}/{table}.parquet');"
-    )
-    return con.table(view)
+    path = f"s3://{S3['lake_bucket']}/{layer}/{table}"
+    return read_delta(con, path, f"{layer}_{table}")
 
 
-def _write(con, expr, layer, table):
-    tmp = f"_out_{table}"
-    con.create_table(tmp, expr, overwrite=True)
-    con.raw_sql(
-        f"COPY {tmp} TO '{LAKE}/{layer}/{table}.parquet'"
-        " (FORMAT parquet, OVERWRITE_OR_IGNORE);"
-    )
-    con.raw_sql(f"DROP TABLE IF EXISTS {tmp};")
-
-
+# ---------------------------------------------------------------------------
+# SILVER: translate + cleanse + deduplicate
+# ---------------------------------------------------------------------------
 def build_silver(con):
-    cust = _read(con, "bronze", "customers").select(
-        "customer_id", "full_name", "email", "country", "signup_date"
-    )
-    prod = _read(con, "bronze", "products").select(
-        "product_id", "product_name", "category", "unit_price"
-    )
-    orders = _read(con, "bronze", "orders").select(
-        "order_id", "customer_id", "order_date", "status"
-    )
-    items = _read(con, "bronze", "order_items").select(
-        "order_item_id", "order_id", "product_id", "quantity", "unit_price"
-    )
+    customers = _read(con, "bronze", "customers")
+    products = _read(con, "bronze", "products")
+    stores = _read(con, "bronze", "stores")
+    transactions = _read(con, "bronze", "transactions")
+    items = _read(con, "bronze", "transaction_items")
+    category_ref = _read(con, "bronze", "category_ref")
+    status_ref = _read(con, "bronze", "status_ref")
+    country_ref = _read(con, "bronze", "country_ref")
 
-    # customers: trim/lower/upper + dedupe on email (keep min customer_id)
-    cust_clean = cust.mutate(
-        full_name=cust.full_name.strip(),
-        email=cust.email.lower(),
-        country=cust.country.upper(),
+    # customers: trim/lower/upper + dedupe on email + translate country code
+    cust_clean = customers.mutate(
+        full_name=customers.full_name.strip(),
+        email=customers.email.lower(),
+        country_code=customers.country_code.upper(),
     )
     min_cid = cust_clean.group_by("email").agg(customer_id=cust_clean.customer_id.min())
-    silver_customers = min_cid.join(
-        cust_clean.select("customer_id", "full_name", "country", "signup_date"),
-        "customer_id",
-    ).select("customer_id", "full_name", "email", "country", "signup_date")
+    silver_customers = (
+        min_cid.join(
+            cust_clean.select("customer_id", "full_name", "country_code", "signup_date"),
+            "customer_id",
+        )
+        .join(country_ref, "country_code")
+        .select(
+            "customer_id",
+            "full_name",
+            "email",
+            "country_code",
+            "country_name",
+            "signup_date",
+        )
+    )
 
-    # products: trim name / lower category + dedupe on (name, category)
-    prod_clean = prod.mutate(
-        product_name=prod.product_name.strip(),
-        category=prod.category.lower(),
-    ).filter(prod.unit_price >= 0)
-    min_pid = prod_clean.group_by(["product_name", "category"]).agg(
+    # products: trim name + valid price + dedupe on (name, category) + translate category code
+    prod_clean = products.mutate(
+        product_name=products.product_name.strip(),
+        category_code=products.category_code.upper(),
+    ).filter(products.unit_price >= 0)
+    min_pid = prod_clean.group_by(["product_name", "category_code"]).agg(
         product_id=prod_clean.product_id.min()
     )
-    silver_products = min_pid.join(
-        prod_clean.select("product_id", "unit_price"), "product_id"
-    ).select("product_id", "product_name", "category", "unit_price")
-
-    # orders: keep known statuses, normalized text
-    silver_orders = orders.mutate(status=orders.status.lower()).filter(
-        orders.status.lower().isin(["placed", "shipped", "delivered", "cancelled"])
+    silver_products = (
+        min_pid.join(
+            prod_clean.select("product_id", "unit_price"), "product_id"
+        )
+        .join(category_ref, "category_code")
+        .select("product_id", "product_name", "category_code", "category_name", "unit_price")
     )
 
-    # sales: order lines enriched with valid customer/product references
-    silver_sales = (
-        items.join(orders, "order_id")
-        .join(silver_customers, "customer_id")
-        .join(silver_products, "product_id")
-        .mutate(line_amount=(items.quantity * items.unit_price).round(2))
+    # stores: clean + translate country code
+    silver_stores = (
+        stores.mutate(
+            store_name=stores.store_name.strip(),
+            city=stores.city.strip(),
+            country_code=stores.country_code.upper(),
+        )
+        .join(country_ref, "country_code")
+        .select("store_id", "store_name", "city", "country_code", "country_name")
+    )
+
+    # transactions: cleanse (drop bad rows) + translate status code
+    silver_transactions = (
+        transactions.join(status_ref, "status_code")
+        .mutate(status=status_ref.status_name.lower())
+        .filter(status_ref.status_name.lower() == "completed")
         .select(
-            "order_item_id",
-            "order_id",
+            "transaction_id",
+            "store_id",
+            "customer_id",
+            "transaction_date",
+            "status",
+            "payment_method",
+        )
+    )
+
+    # sales fact-atom: items joined to valid dims, deduped on item id, line_amount computed
+    items_s = items.select("item_id", "transaction_id", "product_id", "quantity", "unit_price")
+    silver_sales = (
+        items_s.join(silver_transactions, "transaction_id")
+        .semi_join(silver_customers, "customer_id")
+        .semi_join(silver_products, "product_id")
+        .semi_join(silver_stores, "store_id")
+        .mutate(line_amount=(items_s.quantity * items_s.unit_price).round(2))
+        .select(
+            "item_id",
+            "transaction_id",
+            "store_id",
             "customer_id",
             "product_id",
-            "order_date",
+            "transaction_date",
             "status",
+            "payment_method",
             "quantity",
             "unit_price",
             "line_amount",
         )
     )
 
-    _write(con, silver_customers, "silver", "customers")
-    _write(con, silver_products, "silver", "products")
-    _write(con, silver_orders, "silver", "orders")
-    _write(con, silver_sales, "silver", "sales")
-    print("silver written")
+    write_delta(con, silver_customers, "silver", "customers")
+    write_delta(con, silver_products, "silver", "products")
+    write_delta(con, silver_stores, "silver", "stores")
+    write_delta(con, silver_transactions, "silver", "transactions")
+    write_delta(con, silver_sales, "silver", "sales")
 
 
+# ---------------------------------------------------------------------------
+# GOLD: star schema (dimensions + fact)
+# ---------------------------------------------------------------------------
 def build_gold(con):
-    sales = _read(con, "silver", "sales")
-    products = _read(con, "silver", "products")
-    customers = _read(con, "silver", "customers")
-
-    daily_sales = (
-        sales.group_by("order_date")
-        .agg(
-            order_count=sales.order_id.nunique(),
-            total_revenue=sales.line_amount.sum(),
-            avg_order_value=sales.line_amount.mean().round(2),
-        )
-        .order_by("order_date")
-    )
-
-    category_sales = (
-        sales.join(products, "product_id")
-        .group_by("category")
-        .agg(
-            order_count=sales.order_id.nunique(),
-            units_sold=sales.quantity.sum(),
-            revenue=sales.line_amount.sum(),
-        )
-        .order_by(ibis.desc("revenue"))
-    )
-
-    customer_ltv = (
-        sales.join(customers, "customer_id")
-        .group_by(["customer_id", "full_name", "country"])
-        .agg(
-            order_count=sales.order_id.nunique(),
-            total_spent=sales.line_amount.sum(),
-            last_order_date=sales.order_date.max(),
-        )
-        .order_by(ibis.desc("total_spent"))
-    )
-
-    _write(con, daily_sales, "gold", "daily_sales")
-    _write(con, category_sales, "gold", "category_sales")
-    _write(con, customer_ltv, "gold", "customer_ltv")
-    print("gold written")
-
-
-def build_mart(con):
-    sales = _read(con, "silver", "sales")
     customers = _read(con, "silver", "customers")
     products = _read(con, "silver", "products")
+    stores = _read(con, "silver", "stores")
+    sales = _read(con, "silver", "sales")
 
     dim_customer = customers.select(
         customer_key=customers.customer_id,
         customer_id=customers.customer_id,
         full_name=customers.full_name,
         email=customers.email,
-        country=customers.country,
+        country=customers.country_name,
         signup_date=customers.signup_date,
     )
 
@@ -173,42 +149,100 @@ def build_mart(con):
         product_key=products.product_id,
         product_id=products.product_id,
         product_name=products.product_name,
-        category=products.category,
+        category=products.category_name,
         unit_price=products.unit_price,
     )
 
-    dates = sales.select("order_date").distinct()
+    dim_store = stores.select(
+        store_key=stores.store_id,
+        store_id=stores.store_id,
+        store_name=stores.store_name,
+        city=stores.city,
+        country=stores.country_name,
+    )
+
+    dates = sales.select("transaction_date").distinct()
     dim_date = (
         dates.mutate(
-            date_key=dates.order_date,
-            year=dates.order_date.year(),
-            month=dates.order_date.month(),
-            day=dates.order_date.day(),
+            date_key=dates.transaction_date,
+            year=dates.transaction_date.year(),
+            month=dates.transaction_date.month(),
+            day=dates.transaction_date.day(),
         )
-        .select("date_key", "order_date", "year", "month", "day")
-        .order_by("order_date")
+        .select("date_key", "transaction_date", "year", "month", "day")
+        .order_by("transaction_date")
     )
 
     fact_sales = sales.select(
-        order_item_id=sales.order_item_id,
-        date_key=sales.order_date,
+        item_key=sales.item_id,
+        date_key=sales.transaction_date,
         customer_key=sales.customer_id,
         product_key=sales.product_id,
-        order_id=sales.order_id,
+        store_key=sales.store_id,
+        transaction_id=sales.transaction_id,
         quantity=sales.quantity,
         unit_price=sales.unit_price,
         line_amount=sales.line_amount,
     )
 
-    _write(con, dim_customer, "mart", "dim_customer")
-    _write(con, dim_product, "mart", "dim_product")
-    _write(con, dim_date, "mart", "dim_date")
-    _write(con, fact_sales, "mart", "fact_sales")
-    print("mart written")
+    write_delta(con, dim_customer, "gold", "dim_customer")
+    write_delta(con, dim_product, "gold", "dim_product")
+    write_delta(con, dim_store, "gold", "dim_store")
+    write_delta(con, dim_date, "gold", "dim_date")
+    write_delta(con, fact_sales, "gold", "fact_sales")
+
+
+# ---------------------------------------------------------------------------
+# MART: business-ready data marts
+# ---------------------------------------------------------------------------
+def build_mart(con):
+    sales = _read(con, "gold", "fact_sales")
+    dim_product = _read(con, "gold", "dim_product")
+    dim_store = _read(con, "gold", "dim_store")
+    dim_customer = _read(con, "gold", "dim_customer")
+
+    # daily sales by store
+    daily_sales_mart = (
+        sales.join(dim_store, "store_key")
+        .group_by(["date_key", "store_name"])
+        .agg(
+            transaction_count=sales.transaction_id.nunique(),
+            units_sold=sales.quantity.sum(),
+            revenue=sales.line_amount.sum(),
+        )
+        .order_by(["date_key", "store_name"])
+    )
+
+    # product / category performance
+    product_sales_mart = (
+        sales.join(dim_product, "product_key")
+        .group_by(["category", "product_name"])
+        .agg(
+            units_sold=sales.quantity.sum(),
+            revenue=sales.line_amount.sum(),
+        )
+        .order_by(ibis.desc("revenue"))
+    )
+
+    # customer value
+    customer_sales_mart = (
+        sales.join(dim_customer, "customer_key")
+        .group_by(["customer_key", "full_name", "country"])
+        .agg(
+            transaction_count=sales.transaction_id.nunique(),
+            total_spent=sales.line_amount.sum(),
+            last_sale_date=sales.date_key.max(),
+        )
+        .order_by(ibis.desc("total_spent"))
+    )
+
+    write_delta(con, daily_sales_mart, "mart", "daily_sales_mart")
+    write_delta(con, product_sales_mart, "mart", "product_sales_mart")
+    write_delta(con, customer_sales_mart, "mart", "customer_sales_mart")
 
 
 def run_transform():
-    con = get_con()
+    con = get_conn()
     try:
         build_silver(con)
         build_gold(con)
