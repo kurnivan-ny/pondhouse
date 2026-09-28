@@ -8,22 +8,20 @@ enable every profile.
 
 ## Architecture
 
-```
-              ┌──────────────── batch: Sling ────────────────┐
- sources ────►│                                              ▼
-              │                                     RustFS (S3) + Delta Lake
- CDC: DB ──► Debezium ──► Kafka (KRaft) ──► Aiven S3 sink ──► parquet landing
-                                                             │
-                                   SQLMesh + Ibis (DuckDB engine)
-                                        bronze → silver → gold
-                                                             │
-                                                             ▼
-                                                ClickHouse (marts) ──► Metabase
+<p align="center">
+  <img src="docs/architecture.svg" alt="Postgres POS source flows through Sling ingestion into a Delta medallion on RustFS (bronze, silver, gold, mart) computed with Ibis on DuckDB, then served to ClickHouse and Metabase, orchestrated by Dagster" width="100%">
+</p>
 
-   Dagster   → orchestration + asset checks (Ibis-based)
-   Beszel    → monitoring (profile: monitoring)
-   OpenMetadata → catalog + lineage (profile: governance)
-```
+Alongside the batch path above, a CDC path streams changes:
+`Debezium → Kafka (KRaft) → Aiven S3 sink → s3://cdc-landing/*.parquet`
+(profile `cdc`). Monitoring (Beszel) and catalog/lineage (OpenMetadata) ship as
+their own profiles.
+
+### Services and host ports
+
+<p align="center">
+  <img src="docs/services.svg" alt="Core services RustFS, Postgres, ClickHouse, Metabase, Dagster and Kafka with their host ports, plus the tools, cdc, monitoring and governance profiles" width="100%">
+</p>
 
 ## Stack
 
@@ -35,8 +33,9 @@ enable every profile.
 | Serving | ClickHouse | 25.3 | core | 8123 HTTP / 9009 native | http://localhost:8123/play |
 | Viz | Metabase | latest | core | 3000 | http://localhost:3000 |
 | Orchestration | Dagster | latest | core | 3001 | http://localhost:3001 |
-| Shared DB + demo source | Postgres (wal_level=logical) | 16 | core | 5432 | — |
+| Shared DB + demo source | Postgres (wal_level=logical) | 16 | core | 5433 → 5432 (`POSTGRES_HOST_PORT`) | — |
 | Batch CLI | Sling | latest | `tools` | — | `docker compose exec sling ...` |
+| Medallion ETL | Ibis + DuckDB + deltalake | — | `tools` | — | `docker compose run --rm etl ...` |
 | Monitoring | Beszel (hub + agent) | latest | `monitoring` | 8090 | http://localhost:8090 |
 | Governance | OpenMetadata + Elasticsearch | 1.13.3 / 9.3.0 | `governance` | 8585 / 8080 | http://localhost:8585 |
 
@@ -66,8 +65,11 @@ All profiles combine freely, e.g. `docker compose --profile cdc --profile monito
 pondhouse/
 ├── docker-compose.yml      # the whole platform (core + 4 profiles)
 ├── .env                    # all credentials / config knobs (gitignored)
+├── docs/                   # architecture / star-schema / services diagrams (SVG)
 ├── ingestion/sling/        # batch ingestion: connections + replication YAMLs
 ├── etl/                    # demo medallion ETL: Sling (oltp->bronze) + Ibis (silver/gold/mart)
+│   ├── Dockerfile          # the `etl` service image
+│   └── tests/              # pytest: transforms, ingest modes, DuckDB↔ClickHouse parity
 ├── kafka/                  # Connect image (Debezium + Aiven sink) + connector JSONs
 ├── transformations/        # SQLMesh project (lake=duckdb, serving=clickhouse gateways)
 │   ├── models/             # SQL models (bronze/silver/gold)
@@ -109,41 +111,76 @@ Flow: Debezium → Kafka topics (`demo.<schema>.<table>`) → Aiven sink →
 
 The bundled Postgres doubles as a demo CDC source (database `demo`, `wal_level=logical`).
 
-## Demo ETL (Sling → Ibis)
+## Demo ETL (retail POS: Sling → Ibis → Delta → ClickHouse)
 
-A self-contained medallion pipeline in `etl/` showing the full batch path with
-minimal duplication:
+A self-contained retail medallion pipeline in `etl/`, using **Delta** tables on
+RustFS and **Ibis** (DuckDB) for all transformations. The gold layer is a star
+schema:
 
-```
-oltp (postgres) ──Sling──► bronze/*.parquet (RustFS) ──Ibis──► silver → gold → mart (RustFS)
-```
+<p align="center">
+  <img src="docs/star-schema.svg" alt="fact_sales joins to dim_customer, dim_product, dim_store and dim_date on surrogate keys" width="80%">
+</p>
 
-- **`oltp`** — source tables (`customers`, `products`, `orders`, `order_items`) in the
-  `demo` database, seeded by `etl/sql/00_init.sql`.
-- **`bronze`** — raw parquet landing on RustFS, written by **Sling**
-  (`ingestion/sling/replications/demo-to-lake.yaml`, `oltp.*` → `s3://lake/bronze/{table}.parquet`).
-  Bronze lives only on the lake — there is no Postgres bronze copy (avoids duplication).
-- **`silver` / `gold` / `mart`** — cleaned, aggregated, and star-schema layers computed
-  with **Ibis** (DuckDB engine) in `etl/transform.py`, written back to `s3://lake/{layer}/…`.
+- **`pos`** — retail source in the `demo` DB (`stores`, `products`, `customers`,
+  `transactions`, `transaction_items` + `category_ref`/`status_ref`/`country_ref`
+  lookups), seeded by `etl/sql/00_init.sql`.
+- **`bronze`** — raw **Delta** copy + `_ingested_at` (`etl/bronze.py`), from the Sling
+  parquet landing (`pos.*` → `s3://lake/ingestion/{table}.parquet`).
+- **`silver`** — **translate** (join lookups → names), **cleanse**, **deduplicate**.
+- **`gold`** — star schema (`dim_customer`/`dim_product`/`dim_store`/`dim_date`, `fact_sales`).
+- **`mart`** — data marts (`daily_sales_mart`, `product_sales_mart`, `customer_sales_mart`).
+- **`marts`** — ClickHouse serving tables (`DeltaLake` engine) created by `etl/serve.py`.
+
+Everything runs in Docker — no local Python needed:
 
 ```bash
-cd etl
-uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
+docker compose up -d postgres rustfs clickhouse createbuckets   # core services
 
-.venv/bin/python etl.py --init            # seed oltp, then migrate + transform
-.venv/bin/python generate_data.py --rows 5    # insert sample orders manually
-.venv/bin/python etl.py                   # migrate (Sling) + transform (Ibis)
-.venv/bin/python scheduler.py --once      # one full cycle: generate + ETL
-.venv/bin/python scheduler.py             # run on cron (ETL_SCHEDULE_CRON, default */5 * * * *)
+# seed the POS source (once)
+docker compose exec -T postgres \
+  psql -U pondhouse -d demo -v ON_ERROR_STOP=1 < etl/sql/00_init.sql
+
+# the whole pipeline: ingest -> bronze -> silver/gold/mart -> clickhouse
+docker compose --profile tools run --rm etl python etl.py
+
+# add source rows, then re-run
+docker compose --profile tools run --rm etl python generate_data.py --rows 5
+
+# tests (44) — includes DuckDB vs ClickHouse parity
+docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
+  python -m pytest tests/ -q
 ```
 
-- The **scheduler** (`etl/scheduler.py`, APScheduler) inserts a new order into `oltp`
+Or run it as a **Dagster** asset graph (ingestion → bronze → transform → serve,
+with asset checks) from http://localhost:3001, or headless:
+
+```bash
+docker compose up -d dagster-webserver dagster-daemon
+docker exec -w /opt/dagster -e PYTHONPATH=/opt/dagster \
+  pondhouse-dagster-webserver dagster asset materialize --select '*' -m repo.definitions
+```
+
+- The **scheduler** (`etl/scheduler.py`, APScheduler) inserts a new POS transaction
   each cycle, then runs the whole pipeline. Cadence is `ETL_SCHEDULE_CRON`.
-- `etl/migrate.py` shells out to `docker compose --profile tools exec sling sling run …`
-  (the `tools` profile is pulled/started automatically on first run).
-- Connections/config live in `etl/config.py` and `ingestion/sling/env.yaml`
-  (defaults match `.env`). The same `oltp` tables are the demo source for the CDC
+- Full reference: **`etl/README.md`**. The same `pos` tables can also feed the CDC
   pipeline above.
+
+### Querying the marts (Metabase, DBeaver, any JDBC client)
+
+ClickHouse publishes HTTP on **8123** and the native protocol on **9009**
+(container 9000 is remapped because RustFS owns 9000 on the host). DBeaver's
+ClickHouse driver uses HTTP, so connect with:
+
+| Setting | Value |
+|---|---|
+| Host / Port | `localhost` / **8123** |
+| Database | `marts` |
+| User / Password | `default` / `pondhouse` (`.env`) |
+
+```bash
+curl -s 'http://localhost:8123/?user=default&password=pondhouse' \
+  --data-binary 'SELECT * FROM marts.daily_sales_mart ORDER BY date_key FORMAT Pretty'
+```
 
 ## Transformations
 
@@ -194,6 +231,13 @@ docker compose --profile governance up -d
   OM's databases manually:
   `docker compose exec postgres psql -U pondhouse -f /docker-entrypoint-initdb.d/01_dbs.sql`
 - Upgrade via `OM_VERSION` in `.env`.
+
+## DBeaver (and other host clients)
+
+`serving/config.d/listen.xml` sets `listen_host=0.0.0.0` so the published ports
+reach the server from the host. Connect DBeaver via HTTP: host `localhost`, port
+`8123`, database `marts`, user `default`, password from `.env`
+(`CLICKHOUSE_PASSWORD`). Native TCP also available on port `9009`.
 
 ## Overlapping components (by design)
 

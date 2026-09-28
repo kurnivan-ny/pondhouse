@@ -16,8 +16,8 @@ gateways:
   serving:
     connection:
       type: clickhouse
-      host: localhost          # use "clickhouse" if SQLMesh runs inside the compose network
-      port: 8123
+      host: "{{ env_var('CLICKHOUSE_HOST', 'localhost') }}"  # use "clickhouse" if SQLMesh runs inside the compose network
+      port: "{{ env_var('CLICKHOUSE_PORT', '8123') }}"
       username: default
       password: "{{ env_var('CLICKHOUSE_PASSWORD') }}"
 

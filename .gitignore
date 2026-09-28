@@ -12,3 +12,4 @@ ingestion/sling/.cache/
 ingestion/sling/.duckdb/
 ingestion/sling/.sling/
 ingestion/sling/executions/
+.pytest_cache/

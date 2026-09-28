@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" width="900" height="400" role="img" aria-labelledby="t d">
+  <title id="t">Pondhouse services and host ports</title>
+  <desc id="d">Core services RustFS, Postgres, ClickHouse, Metabase and Dagster, plus the tools, cdc, monitoring and governance profiles, with the host port each publishes.</desc>
+
+  <style>
+    .h    { font: 700 12px ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; }
+    .n    { font: 600 12px ui-sans-serif, system-ui, sans-serif; }
+    .p    { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .card { rx: 9; ry: 9; stroke-width: 1.5; }
+  </style>
+
+  <rect width="900" height="400" fill="#ffffff"/>
+
+  <!-- core -->
+  <rect x="24" y="44" width="500" height="196" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="40" y="66" class="h" fill="#475569">CORE — docker compose up -d</text>
+
+  <rect x="42" y="80" width="150" height="62" class="card" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="56" y="102" class="n" fill="#1e3a8a">RustFS (S3)</text>
+  <text x="56" y="122" class="p" fill="#3b82f6">9000 · 9001 UI</text>
+
+  <rect x="206" y="80" width="150" height="62" class="card" fill="#f0f9ff" stroke="#bae6fd"/>
+  <text x="220" y="102" class="n" fill="#075985">Postgres 16</text>
+  <text x="220" y="122" class="p" fill="#0284c7">5433 → 5432</text>
+
+  <rect x="370" y="80" width="138" height="62" class="card" fill="#fef2f2" stroke="#fecaca"/>
+  <text x="384" y="102" class="n" fill="#991b1b">ClickHouse</text>
+  <text x="384" y="122" class="p" fill="#dc2626">8123 · 9009</text>
+
+  <rect x="42" y="158" width="150" height="62" class="card" fill="#faf5ff" stroke="#e9d5ff"/>
+  <text x="56" y="180" class="n" fill="#6b21a8">Metabase</text>
+  <text x="56" y="200" class="p" fill="#9333ea">3000</text>
+
+  <rect x="206" y="158" width="150" height="62" class="card" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="220" y="180" class="n" fill="#334155">Dagster</text>
+  <text x="220" y="200" class="p" fill="#64748b">3001</text>
+
+  <rect x="370" y="158" width="138" height="62" class="card" fill="#fffbeb" stroke="#fde68a"/>
+  <text x="384" y="180" class="n" fill="#854d0e">Kafka</text>
+  <text x="384" y="200" class="p" fill="#a16207">29092</text>
+
+  <!-- profiles -->
+  <rect x="548" y="44" width="328" height="196" rx="14" fill="#fcfcfd" stroke="#e2e8f0" stroke-dasharray="5 4"/>
+  <text x="564" y="66" class="h" fill="#475569">PROFILES — --profile &lt;name&gt;</text>
+
+  <rect x="566" y="80" width="292" height="34" class="card" fill="#ecfeff" stroke="#a5f3fc"/>
+  <text x="580" y="102" class="n" fill="#155e75">tools — Sling CLI + etl runner</text>
+
+  <rect x="566" y="122" width="292" height="34" class="card" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text x="580" y="144" class="n" fill="#166534">cdc — Kafka Connect · 8083</text>
+
+  <rect x="566" y="164" width="292" height="34" class="card" fill="#fef3c7" stroke="#fcd34d"/>
+  <text x="580" y="186" class="n" fill="#92400e">monitoring — Beszel · 8090</text>
+
+  <rect x="566" y="206" width="292" height="26" class="card" fill="#f5f3ff" stroke="#ddd6fe"/>
+  <text x="580" y="224" class="n" fill="#5b21b6">governance — OpenMetadata · 8585</text>
+
+  <!-- pipeline strip -->
+  <rect x="24" y="268" width="852" height="96" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="40" y="290" class="h" fill="#475569">PIPELINE — docker compose --profile tools run --rm etl python etl.py</text>
+
+  <text x="46" y="318" class="p" fill="#0891b2">ingest</text>
+  <text x="112" y="318" class="p" fill="#94a3b8">→</text>
+  <text x="140" y="318" class="p" fill="#c2410c">bronze</text>
+  <text x="212" y="318" class="p" fill="#94a3b8">→</text>
+  <text x="240" y="318" class="p" fill="#64748b">silver</text>
+  <text x="304" y="318" class="p" fill="#94a3b8">→</text>
+  <text x="332" y="318" class="p" fill="#a16207">gold</text>
+  <text x="388" y="318" class="p" fill="#94a3b8">→</text>
+  <text x="416" y="318" class="p" fill="#16a34a">mart</text>
+  <text x="472" y="318" class="p" fill="#94a3b8">→</text>
+  <text x="500" y="318" class="p" fill="#dc2626">clickhouse marts.*</text>
+
+  <text x="46" y="344" class="p" fill="#94a3b8">Delta on RustFS · one Ibis expression · DuckDB engine · verified identical on ClickHouse</text>
+</svg>

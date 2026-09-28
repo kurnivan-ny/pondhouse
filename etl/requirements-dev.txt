@@ -1,0 +1,6 @@
+# Test-only dependencies (installed into the etl image on top of requirements.txt).
+-r requirements.txt
+pytest==8.3.4
+pandas==2.2.3
+# ClickHouse backend for the cross-engine parity tests; they skip without a server.
+ibis-framework[clickhouse]==9.2.0
