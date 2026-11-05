@@ -9,9 +9,13 @@ Usage:
   python transform.py
 """
 import ibis
+from ibis import _
 
 from config import S3
 from conn import get_conn, read_delta, write_delta
+
+
+UNKNOWN = "Unknown"
 
 
 def _read(con, layer, table):
@@ -19,32 +23,53 @@ def _read(con, layer, table):
     return read_delta(con, path, f"{layer}_{table}")
 
 
+def _dedupe(table, key):
+    """Keep one row per primary key, so re-ingested rows cannot fan out joins.
+
+    Append-mode ingestion stamps `_loaded_at`, so the newest version wins there.
+    Other modes cannot produce duplicates with differing values.
+    """
+    order = [ibis.desc("_loaded_at")] if "_loaded_at" in table.columns else []
+    window = ibis.window(group_by=key, order_by=[*order, key])
+    return table.mutate(_rn=ibis.row_number().over(window)).filter(_._rn == 0).drop("_rn")
+
+
+def _read_bronze(con, table, key):
+    return _dedupe(_read(con, "bronze", table), key)
+
+
 # ---------------------------------------------------------------------------
 # SILVER: translate + cleanse + deduplicate
 # ---------------------------------------------------------------------------
 def build_silver(con):
-    customers = _read(con, "bronze", "customers")
-    products = _read(con, "bronze", "products")
-    stores = _read(con, "bronze", "stores")
-    transactions = _read(con, "bronze", "transactions")
-    items = _read(con, "bronze", "transaction_items")
-    category_ref = _read(con, "bronze", "category_ref")
-    status_ref = _read(con, "bronze", "status_ref")
-    country_ref = _read(con, "bronze", "country_ref")
+    customers = _read_bronze(con, "customers", "customer_id")
+    products = _read_bronze(con, "products", "product_id")
+    stores = _read_bronze(con, "stores", "store_id")
+    transactions = _read_bronze(con, "transactions", "transaction_id")
+    items = _read_bronze(con, "transaction_items", "item_id")
+    category_ref = _read_bronze(con, "category_ref", "category_code")
+    status_ref = _read_bronze(con, "status_ref", "status_code")
+    country_ref = _read_bronze(con, "country_ref", "country_code")
 
-    # customers: trim/lower/upper + dedupe on email + translate country code
+    # customers: trim/lower/upper + dedupe on email + translate country code.
+    # An unknown code keeps the customer, labelled "Unknown", so their sales stay.
     cust_clean = customers.mutate(
         full_name=customers.full_name.strip(),
         email=customers.email.lower(),
         country_code=customers.country_code.upper(),
     )
     min_cid = cust_clean.group_by("email").agg(customer_id=cust_clean.customer_id.min())
+    # Every source id -> the id that survived dedup, so sales follow the survivor.
+    customer_map = cust_clean.select("customer_id", "email").join(
+        min_cid.rename(surviving_customer_id="customer_id"), "email"
+    ).select("customer_id", "surviving_customer_id")
     silver_customers = (
         min_cid.join(
             cust_clean.select("customer_id", "full_name", "country_code", "signup_date"),
             "customer_id",
         )
-        .join(country_ref, "country_code")
+        .left_join(country_ref, "country_code")
+        .mutate(country_name=ibis.coalesce(_.country_name, UNKNOWN))
         .select(
             "customer_id",
             "full_name",
@@ -63,11 +88,16 @@ def build_silver(con):
     min_pid = prod_clean.group_by(["product_name", "category_code"]).agg(
         product_id=prod_clean.product_id.min()
     )
+    product_map = prod_clean.select("product_id", "product_name", "category_code").join(
+        min_pid.rename(surviving_product_id="product_id"),
+        ["product_name", "category_code"],
+    ).select("product_id", "surviving_product_id")
     silver_products = (
         min_pid.join(
             prod_clean.select("product_id", "unit_price"), "product_id"
         )
-        .join(category_ref, "category_code")
+        .left_join(category_ref, "category_code")
+        .mutate(category_name=ibis.coalesce(_.category_name, UNKNOWN))
         .select("product_id", "product_name", "category_code", "category_name", "unit_price")
     )
 
@@ -78,15 +108,18 @@ def build_silver(con):
             city=stores.city.strip(),
             country_code=stores.country_code.upper(),
         )
-        .join(country_ref, "country_code")
+        .left_join(country_ref, "country_code")
+        .mutate(country_name=ibis.coalesce(_.country_name, UNKNOWN))
         .select("store_id", "store_name", "city", "country_code", "country_name")
     )
 
-    # transactions: cleanse (drop bad rows) + translate status code
+    # transactions: keep completed + translate status code + follow the surviving customer
     silver_transactions = (
         transactions.join(status_ref, "status_code")
-        .mutate(status=status_ref.status_name.lower())
-        .filter(status_ref.status_name.lower() == "completed")
+        .mutate(status=_.status_name.lower())
+        .filter(_.status == "completed")
+        .join(customer_map, "customer_id")
+        .mutate(customer_id=_.surviving_customer_id)
         .select(
             "transaction_id",
             "store_id",
@@ -97,14 +130,18 @@ def build_silver(con):
         )
     )
 
-    # sales fact-atom: items joined to valid dims, deduped on item id, line_amount computed
+    # sales fact-atom: items of completed transactions, following the surviving
+    # product, joined to valid dims, line_amount computed
     items_s = items.select("item_id", "transaction_id", "product_id", "quantity", "unit_price")
+    completed_items = items_s.join(silver_transactions, "transaction_id")
     silver_sales = (
-        items_s.join(silver_transactions, "transaction_id")
+        completed_items.join(product_map, "product_id")
+        .mutate(
+            product_id=_.surviving_product_id,
+            line_amount=(_.quantity * _.unit_price).round(2),
+        )
         .semi_join(silver_customers, "customer_id")
-        .semi_join(silver_products, "product_id")
         .semi_join(silver_stores, "store_id")
-        .mutate(line_amount=(items_s.quantity * items_s.unit_price).round(2))
         .select(
             "item_id",
             "transaction_id",
@@ -120,11 +157,19 @@ def build_silver(con):
         )
     )
 
+    # Completed items that could not become a sale (e.g. an invalid product).
+    # Kept for inspection, so sales + rejected always reconciles with the source.
+    rejected_sales = completed_items.anti_join(silver_sales, "item_id").select(
+        "item_id", "transaction_id", "store_id", "customer_id", "product_id",
+        "quantity", "unit_price",
+    )
+
     write_delta(con, silver_customers, "silver", "customers")
     write_delta(con, silver_products, "silver", "products")
     write_delta(con, silver_stores, "silver", "stores")
     write_delta(con, silver_transactions, "silver", "transactions")
     write_delta(con, silver_sales, "silver", "sales")
+    write_delta(con, rejected_sales, "silver", "rejected_sales")
 
 
 # ---------------------------------------------------------------------------

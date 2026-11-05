@@ -127,7 +127,8 @@ schema:
   lookups), seeded by `etl/sql/00_init.sql`.
 - **`bronze`** — raw **Delta** copy + `_ingested_at` (`etl/bronze.py`), from the Sling
   parquet landing (`pos.*` → `s3://lake/ingestion/{table}.parquet`).
-- **`silver`** — **translate** (join lookups → names), **cleanse**, **deduplicate**.
+- **`silver`** — **translate** (join lookups → names), **cleanse**, **deduplicate**;
+  rows that can't become a sale are kept in `silver.rejected_sales`.
 - **`gold`** — star schema (`dim_customer`/`dim_product`/`dim_store`/`dim_date`, `fact_sales`).
 - **`mart`** — data marts (`daily_sales_mart`, `product_sales_mart`, `customer_sales_mart`).
 - **`marts`** — ClickHouse serving tables (`DeltaLake` engine) created by `etl/serve.py`.
@@ -147,9 +148,12 @@ docker compose --profile tools run --rm etl python etl.py
 # add source rows, then re-run
 docker compose --profile tools run --rm etl python generate_data.py --rows 5
 
-# tests (44) — includes DuckDB vs ClickHouse parity
+# tests — includes DuckDB vs ClickHouse parity
 docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
   python -m pytest tests/ -q
+
+# end-to-end check with exact revenue; isolated project, safe next to a live stack
+bash scripts/smoke_test.sh
 ```
 
 Or run it as a **Dagster** asset graph (ingestion → bronze → transform → serve,
@@ -157,8 +161,8 @@ with asset checks) from http://localhost:3001, or headless:
 
 ```bash
 docker compose up -d dagster-webserver dagster-daemon
-docker exec -w /opt/dagster -e PYTHONPATH=/opt/dagster \
-  pondhouse-dagster-webserver dagster asset materialize --select '*' -m repo.definitions
+docker compose exec -w /opt/dagster -e PYTHONPATH=/opt/dagster \
+  dagster-webserver dagster asset materialize --select '*' -m repo.definitions
 ```
 
 - The **scheduler** (`etl/scheduler.py`, APScheduler) inserts a new POS transaction

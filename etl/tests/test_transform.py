@@ -4,15 +4,20 @@ Each test pins a bug that was live in transform.py: stale table references that
 survive a join, a dedup that dropped rows instead of selecting survivors, and a
 status filter applied to the wrong relation.
 """
+from datetime import datetime
+
 import pandas as pd
+import pytest
+
+import transform
 
 
 # --- silver: customers -----------------------------------------------------
 
 def test_silver_customers_dedupes_on_normalized_email(built):
     df = built.df("silver", "customers")
-    assert sorted(df["customer_id"]) == [1, 2]
-    assert sorted(df["email"]) == ["alice@example.com", "bob@example.com"]
+    assert sorted(df["customer_id"]) == [1, 2, 6]
+    assert sorted(df["email"]) == ["alice@example.com", "bob@example.com", "eve@example.com"]
 
 
 def test_silver_customers_cleanses_and_translates(built):
@@ -33,7 +38,7 @@ def test_silver_customers_keeps_email_column(built):
 def test_silver_products_dedupes_on_name_and_category(built):
     df = built.df("silver", "products")
     # products 2 and 7 collide on (product_name, category_code) -> keep min id
-    assert sorted(df["product_id"]) == [1, 2]
+    assert sorted(df["product_id"]) == [1, 2, 9]
 
 
 def test_silver_products_drops_negative_price(built):
@@ -51,7 +56,7 @@ def test_silver_products_keeps_surviving_row_values(built):
 
 def test_silver_transactions_keeps_only_completed(built):
     df = built.df("silver", "transactions")
-    assert sorted(df["transaction_id"]) == [1, 2]
+    assert sorted(df["transaction_id"]) == [1, 2, 5, 6]
     assert set(df["status"]) == {"completed"}
 
 
@@ -75,6 +80,75 @@ def test_silver_sales_line_amount_matches_quantity_times_price(built):
     pd.testing.assert_series_equal(
         df["line_amount"].astype(float), expected.astype(float), check_names=False
     )
+
+
+def test_sale_by_duplicate_customer_follows_the_survivor(built):
+    df = built.df("silver", "sales").set_index("item_id")
+    assert df.loc[5, "customer_id"] == 1
+    assert 5 not in set(built.df("gold", "fact_sales")["customer_key"])
+
+
+def test_sale_of_duplicate_product_follows_the_survivor(built):
+    df = built.df("silver", "sales").set_index("item_id")
+    assert df.loc[6, "product_id"] == 2
+    # the price actually charged is kept, not the survivor's list price
+    assert df.loc[6, "line_amount"] == 13.00
+
+
+def test_unknown_codes_are_labelled_and_their_sales_are_kept(built):
+    customers = built.df("silver", "customers").set_index("customer_id")
+    assert customers.loc[6, "country_name"] == "Unknown"
+    products = built.df("silver", "products").set_index("product_id")
+    assert products.loc[9, "category_name"] == "Unknown"
+    assert {7, 8} <= set(built.df("silver", "sales")["item_id"])
+
+
+def test_invalid_product_sale_is_rejected_not_lost(built):
+    assert 9 not in set(built.df("silver", "sales")["item_id"])
+    assert list(built.df("silver", "rejected_sales")["item_id"]) == [9]
+
+
+def test_sales_plus_rejected_reconcile_with_completed_source_items(built):
+    sales = set(built.df("silver", "sales")["item_id"])
+    rejected = set(built.df("silver", "rejected_sales")["item_id"])
+    assert sales | rejected == {1, 2, 3, 5, 6, 7, 8, 9}
+    assert not sales & rejected
+
+
+def test_total_revenue_is_exact(built):
+    # 1200 + 25 + 37.5 + 12.5 + 13 + 100 + 9.99
+    assert built.df("gold", "fact_sales")["line_amount"].sum() == pytest.approx(1397.99)
+
+
+def test_duplicated_bronze_does_not_multiply_revenue(lake, monkeypatch):
+    """Running --mode append twice leaves every bronze row twice."""
+    import conftest
+
+    for table, rows in conftest.BRONZE.items():
+        monkeypatch.setitem(conftest.BRONZE, table, rows * 2)
+    lake.seed_bronze()
+    transform.build_silver(lake.con)
+    transform.build_gold(lake.con)
+    transform.build_mart(lake.con)
+
+    fact = lake.df("gold", "fact_sales")
+    assert fact["item_key"].is_unique
+    assert fact["line_amount"].sum() == pytest.approx(1397.99)
+
+
+def test_dedupe_keeps_newest_loaded_at_version(lake):
+    """A row re-read after an update must win over its older appended copy."""
+    t = lake.con.create_table(
+        "appended",
+        [
+            {"store_id": 1, "store_name": "old", "_loaded_at": datetime(2026, 1, 1)},
+            {"store_id": 1, "store_name": "new", "_loaded_at": datetime(2026, 1, 2)},
+            {"store_id": 2, "store_name": "only", "_loaded_at": datetime(2026, 1, 1)},
+        ],
+    )
+    got = transform._dedupe(t, "store_id").to_pandas().set_index("store_id")
+    assert got.loc[1, "store_name"] == "new"
+    assert len(got) == 2
 
 
 # --- gold ------------------------------------------------------------------

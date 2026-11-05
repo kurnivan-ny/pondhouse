@@ -1,0 +1,9 @@
+# Overlay for scripts/smoke_test.sh: no published ports, so the smoke test can run
+# next to a live stack on the same machine.
+services:
+  rustfs:
+    ports: !reset []
+  clickhouse:
+    ports: !reset []
+  postgres:
+    ports: !reset []

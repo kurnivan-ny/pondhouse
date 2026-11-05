@@ -27,6 +27,8 @@ BRONZE = {
         (2, "Bob Lim", "bob@example.com", "MY", "2026-02-01"),
         # duplicate of customer 1 by email (differs in case/whitespace)
         (5, "Alice Tan", "alice@example.com", "SG", "2026-04-01"),
+        # country code missing from country_ref -> kept, labelled Unknown
+        (6, "Eve Goh", "eve@example.com", "XX", "2026-05-01"),
     ],
     "products": [
         # product_id, product_name, category_code, unit_price
@@ -36,6 +38,8 @@ BRONZE = {
         (7, "USB-C Cable", "ACCESS", 13.00),
         # invalid price -> must be cleansed away
         (8, "Broken Item", "ELEC", -1.00),
+        # category code missing from category_ref -> kept, labelled Unknown
+        (9, "Mystery Box", "ZZZ", 9.99),
     ],
     "stores": [
         (1, " Flagship Store ", " Singapore ", "sg"),
@@ -48,6 +52,10 @@ BRONZE = {
         # non-completed -> must be filtered out of silver
         (3, 1, 1, "2026-08-03", "P", "EWALLET"),
         (4, 2, 2, "2026-08-04", "X", "CASH"),
+        # bought by the duplicate customer 5 -> must follow survivor customer 1
+        (5, 1, 5, "2026-08-05", "C", "CARD"),
+        # bought by customer 6, whose country is unknown -> must not be lost
+        (6, 2, 6, "2026-08-06", "C", "CASH"),
     ],
     "transaction_items": [
         # item_id, transaction_id, product_id, quantity, unit_price
@@ -56,6 +64,14 @@ BRONZE = {
         (3, 2, 2, 3, 12.50),
         # belongs to a pending transaction -> filtered out with transaction 3
         (4, 3, 1, 1, 1200.00),
+        (5, 5, 2, 1, 12.50),
+        # duplicate product 7 -> must follow survivor product 2
+        (6, 5, 7, 1, 13.00),
+        (7, 6, 1, 1, 100.00),
+        # unknown category product -> kept
+        (8, 6, 9, 1, 9.99),
+        # invalid product 8 -> rejected, and visible in silver.rejected_sales
+        (9, 6, 8, 1, -1.00),
     ],
     "category_ref": [("ELEC", "electronics"), ("ACCESS", "accessories")],
     "status_ref": [("C", "completed"), ("P", "pending"), ("X", "cancelled")],

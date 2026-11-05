@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 
+import ibis
+
 from config import S3, s3_storage_options
 from conn import get_conn, read_pg, vacuum_delta, write_delta
 
@@ -124,7 +126,9 @@ def run_custom(mode="overwrite"):
                 write_delta(con, src, "ingestion", table)
             elif mode == "append":
                 import deltalake
-                arrow = con.to_pyarrow(src)
+                # Silver keeps the newest `_loaded_at` per primary key, so appended
+                # re-reads of a row cannot multiply revenue.
+                arrow = con.to_pyarrow(src.mutate(_loaded_at=ibis.now()))
                 # schema_mode="merge" lets an added source column land without
                 # failing the run with a SchemaMismatchError.
                 deltalake.write_deltalake(path, arrow, mode="append",

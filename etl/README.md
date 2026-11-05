@@ -21,7 +21,7 @@ on RustFS, computed with Ibis, and served to ClickHouse.
 | `pos` | postgres `demo` | source of truth: `stores`, `products`, `customers`, `transactions`, `transaction_items` + `category_ref`, `status_ref`, `country_ref` |
 | `ingestion` | `s3://lake/ingestion/*.parquet` | raw landing (Sling parquet, or custom Delta) |
 | `bronze` | `s3://lake/bronze/*` (Delta) | raw copy + `_ingested_at` |
-| `silver` | `s3://lake/silver/*` (Delta) | **translate** (join refs → names), **cleanse**, **deduplicate** |
+| `silver` | `s3://lake/silver/*` (Delta) | **translate** (join refs → names), **cleanse**, **deduplicate**; `rejected_sales` keeps items that can't become a sale |
 | `gold` | `s3://lake/gold/*` (Delta) | star schema: `dim_customer`, `dim_product`, `dim_store`, `dim_date`, `fact_sales` |
 | `mart` | `s3://lake/mart/*` (Delta) | data marts: `daily_sales_mart`, `product_sales_mart`, `customer_sales_mart` |
 | `marts` | ClickHouse | serving tables (`DeltaLake` engine) reading gold + mart from RustFS |
@@ -101,7 +101,8 @@ docker compose --profile tools run --rm etl python generate_data.py --rows 5
 Delta `ingestion` layer:
 
 - **overwrite** — replace the ingestion Delta table (default)
-- **append** — append new rows (no dedup; re-running duplicates rows)
+- **append** — append every source row stamped with `_loaded_at`. The ingestion
+  layer keeps a history of copies; silver keeps only the newest copy of each key
 - **merge** — upsert on the table's primary key, so re-runs are idempotent
 
 ```bash
@@ -147,7 +148,8 @@ docker compose --profile tools run --rm etl python -m pytest tests/ -q
 The suite covers the silver/gold/mart logic, the ingestion write modes, the
 psycopg2 helpers, and **backend parity**: the same Ibis expressions are executed
 on DuckDB *and* ClickHouse and the results compared row-for-row. The ClickHouse
-tests skip automatically when no server is reachable, so they are CI-safe.
+tests skip when no server is reachable, unless `REQUIRE_CLICKHOUSE=1` is set, which
+makes them fail instead. CI sets it, so parity can't silently stop being tested.
 
 To include them, point the tests at the running ClickHouse:
 
@@ -155,6 +157,10 @@ To include them, point the tests at the running ClickHouse:
 docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
   python -m pytest tests/ -q
 ```
+
+`scripts/smoke_test.sh` runs the real pipeline end to end and asserts exact revenue
+in ClickHouse after overwrite, repeated append, and merge. It uses its own compose
+project, volumes and no published ports, so it is safe next to a live stack.
 
 ## Scheduler
 
@@ -183,6 +189,11 @@ All knobs are env vars with defaults matching `../.env`:
 
 ## Notes on correctness
 
+- **Revenue is not lost or multiplied by silver.** Bronze rows are deduplicated on
+  their primary key. Sales of a duplicate customer or product move to the surviving
+  record, and keep the price actually charged. Unknown country or category codes are
+  labelled `Unknown` rather than dropped. Completed items that still can't become a
+  sale land in `silver.rejected_sales`, so sales + rejected reconcile with the source.
 - **Overwrites are vacuumed.** A Delta overwrite only tombstones the previous data
   files; they stay in the bucket. ClickHouse's `DeltaLake` engine reads the parquet
   files it finds rather than replaying the transaction log, so stale files from an
