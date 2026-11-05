@@ -131,11 +131,11 @@ jobs:
             image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --no-progress pondhouse-${{ matrix.name }}:ci
 
   # Report only for the same reason as Trivy: pip-audit reports known advisories
-  # in the pinned dependencies today. Remove continue-on-error after the upgrades.
+  # in the pinned dependencies today, so it warns instead of failing. Make it
+  # exit non-zero after the upgrades.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -149,4 +149,6 @@ jobs:
           status=0
           pip-audit -r etl/requirements.txt || status=1
           pip-audit -r orchestration/requirements.txt || status=1
-          exit "$status"
+          if [ "$status" -ne 0 ]; then
+            echo "::warning title=pip-audit::Known vulnerabilities in pinned dependencies (report only, see this job's log)"
+          fi
