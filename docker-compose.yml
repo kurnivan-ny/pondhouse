@@ -34,7 +34,7 @@ services:
       - rustfs-data:/data
 
   createbuckets:
-    image: minio/mc:latest
+    image: rustfs/rc:v0.1.36
     depends_on:
       - rustfs
     env_file: .env
@@ -42,11 +42,11 @@ services:
       - /bin/sh
       - -c
       - |
-        until mc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}"; do
+        rc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}" -q
+        until rc bucket create --ignore-existing rustfs/lake; do
           echo "waiting for rustfs..."; sleep 2;
         done
-        mc mb --ignore-existing rustfs/lake
-        mc mb --ignore-existing rustfs/cdc-landing
+        rc bucket create --ignore-existing rustfs/cdc-landing
         echo "buckets ready"
     restart: "no"
 
