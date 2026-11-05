@@ -1,0 +1,4 @@
+# OpenMetadata FERNET_KEY: local-dev default in docker-compose.yml, not a private
+# secret. To be moved to .env along with the other hard-coded credentials; once
+# that is done it still stays in history, so keep this entry.
+3f3ceea5af544395488f01551fa5b0689cd99ba9:docker-compose.yml:generic-api-key:272

@@ -183,11 +183,17 @@ def _clickhouse_con():
 
 @pytest.fixture
 def clickhouse_con():
-    pytest.importorskip("clickhouse_connect")
+    # CI sets REQUIRE_CLICKHOUSE=1 so a broken server fails the build instead of
+    # silently skipping every parity test and reporting green.
+    required = os.getenv("REQUIRE_CLICKHOUSE", "").lower() in ("1", "true", "yes")
+    if not required:
+        pytest.importorskip("clickhouse_connect")
     try:
         con = _clickhouse_con()
         con.raw_sql("SELECT 1")
     except Exception as e:  # pragma: no cover - env dependent
+        if required:
+            pytest.fail(f"REQUIRE_CLICKHOUSE is set but ClickHouse is unusable: {e}")
         pytest.skip(f"ClickHouse not reachable: {e}")
     yield con
     try:
