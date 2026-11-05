@@ -43,6 +43,7 @@ their own profiles.
 
 ```bash
 cd ~/pondhouse
+cp .env.example .env                       # first time only; then edit as needed
 
 docker compose up -d                       # core: rustfs, kafka, clickhouse, postgres, metabase, dagster
 docker compose --profile cdc up -d         # + Kafka Connect (Debezium + Aiven sink)

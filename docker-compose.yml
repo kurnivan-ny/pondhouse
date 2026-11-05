@@ -226,7 +226,7 @@ services:
     image: slingdata/sling:latest
     container_name: pondhouse-sling
     profiles: ["tools"]
-    user: "1000:1000"    # match host uid so /sling mount is writable (sling downloads duckdb to /sling/bin)
+    user: "${SLING_USER:-1000:1000}"    # match host uid:gid so /sling mount is writable (sling downloads duckdb to /sling/bin)
     env_file: .env
     environment:
       HOME: /sling        # writable home so sling can fetch its duckdb runtime

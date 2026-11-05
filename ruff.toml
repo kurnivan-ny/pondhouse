@@ -1,0 +1,6 @@
+target-version = "py312"
+
+[lint]
+# Real defects only for now: syntax errors, undefined names, unused imports.
+# Style rules can be widened in a dedicated cleanup PR.
+select = ["E4", "E7", "E9", "F"]
