@@ -80,7 +80,7 @@ def test_execute_file_closes_connection(fake_conn, tmp_path):
     path = tmp_path / "x.sql"
     path.write_text("SELECT 1;", encoding="utf-8")
     db.execute_file(str(path))
-    assert fake_conn.executed == [("SELECT 1;",)] or fake_conn.executed
+    assert fake_conn.executed == [("SELECT 1;", None)]
     assert fake_conn.closed
     assert fake_conn.committed
 

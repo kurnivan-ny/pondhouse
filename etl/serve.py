@@ -11,7 +11,6 @@ Usage:
 """
 import os
 import urllib.error
-import urllib.parse
 import urllib.request
 
 SQL_FILE = os.path.abspath(
@@ -46,11 +45,16 @@ def split_statements(sql):
 
 def execute(statement, timeout=120):
     """Run one statement against ClickHouse over HTTP, raising on error."""
-    params = urllib.parse.urlencode(
-        {"user": CLICKHOUSE_USER, "password": CLICKHOUSE_PASSWORD}
+    # Credentials go in headers: a query string can end up in logs.
+    request = urllib.request.Request(
+        f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
+        data=statement.encode("utf-8"),
+        headers={
+            "X-ClickHouse-User": CLICKHOUSE_USER,
+            "X-ClickHouse-Key": CLICKHOUSE_PASSWORD,
+        },
+        method="POST",
     )
-    url = f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/?{params}"
-    request = urllib.request.Request(url, data=statement.encode("utf-8"), method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8", "replace")

@@ -2,7 +2,7 @@
 
 Primary: Sling batch replication to parquet.
 Fallback: custom Ibis/DuckDB ingestion directly to Delta, supporting
-overwrite / append modes.
+overwrite / append / merge modes.
 
 Usage:
   python ingest.py              # Sling (default)
@@ -15,22 +15,12 @@ import subprocess
 
 import ibis
 
-from config import S3, s3_storage_options
+from config import S3, TABLES, s3_storage_options
 from conn import get_conn, read_pg, vacuum_delta, write_delta
 
 PONDHOUSE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TABLES = [
-    "stores",
-    "products",
-    "customers",
-    "transactions",
-    "transaction_items",
-    "category_ref",
-    "status_ref",
-    "country_ref",
-]
 
-# Primary key mapping for each table (for future merge implementation)
+# Primary key of each table, used by merge mode.
 PRIMARY_KEYS = {
     "stores": "store_id",
     "products": "product_id",

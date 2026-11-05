@@ -42,11 +42,12 @@ on RustFS, computed with Ibis, and served to ClickHouse.
 | `bronze.py` | ingestion → **bronze** Delta (adds `_ingested_at`) |
 | `transform.py` | **silver** (translate/cleanse/dedup) → **gold** (fact+dim) → **mart** |
 | `serve.py` | creates ClickHouse `marts` tables over the Delta gold + mart layers |
+| `checks.py` | data-quality checks, run by Dagster or by hand: `python checks.py gold` |
 | `etl.py` | orchestrator: `ingest → bronze → transform → serve` (`--init` seeds) |
 | `scheduler.py` | APScheduler cron: each cycle generates data + runs the ETL |
 | `conn.py` | Ibis/DuckDB connection helper (S3 Delta, optional Postgres attach) |
 | `config.py` | Postgres + RustFS + cron config (env-overridable) |
-| `Dockerfile` | the `etl` image used by `docker compose run --rm etl ...` |
+| `Dockerfile` | `runtime` (pipeline only) and `dev` (adds tests, used by `docker compose run --rm etl ...`) targets |
 | `tests/` | pytest suite (transforms, ingest modes, db helpers, backend parity) |
 
 ## Run it (Docker)
@@ -114,7 +115,7 @@ docker compose --profile tools run --rm etl python ingest.py --method custom --m
 ClickHouse serves the gold + mart layers as `marts.*`:
 
 ```bash
-curl -s 'http://localhost:8123/?user=default&password=pondhouse' \
+curl -s -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" http://localhost:8123/ \
   --data-binary 'SELECT * FROM marts.daily_sales_mart ORDER BY date_key FORMAT Pretty'
 ```
 
@@ -201,5 +202,8 @@ All knobs are env vars with defaults matching `../.env`:
   different schema is not possible"*. `write_delta` now vacuums after each write.
 - **`_ingested_at` is batch-level.** `ibis.now()` is transaction-constant, so every
   row of a given run shares one load timestamp — intended for a batch load stamp.
+- **Asset checks are real.** Each layer has row counts; gold also checks uniqueness,
+  foreign keys and revenue against silver; serving compares ClickHouse row counts
+  with Delta. A failed check is reported in Dagster but does not stop the run.
 - **Only ingestion touches Postgres.** The lake steps run with no Postgres attach,
   so bronze/silver/gold/mart still work when the source database is down.

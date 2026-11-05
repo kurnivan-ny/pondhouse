@@ -5,6 +5,9 @@ dagster-graphql==1.7.7
 # Dagster's integration libraries use the 0.x line: 0.23.7 == core 1.7.7
 dagster-postgres==0.23.7
 psycopg2-binary==2.9.9
+# SQLAlchemy 2.1 changes the default Postgres driver to psycopg (v3), whose server-side
+# binding breaks the NOTIFY statements in dagster-postgres 0.23.
+sqlalchemy>=2.0,<2.1
 ibis-framework[duckdb,clickhouse]==9.2.0
 # Must match etl/requirements.txt: ibis 9.2 uses duckdb.functional, which was
 # removed in duckdb >= 1.2 (AttributeError: module 'duckdb' has no attribute

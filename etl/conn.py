@@ -1,16 +1,14 @@
 """Ibis + DuckDB lake connection helper.
 
 Creates one DuckDB connection that can read Postgres (source), read/write Delta
-on RustFS (lake), and run Ibis expressions. Extensions (delta, postgres) and the
-S3 secret are cached in a local DuckDB file.
+on RustFS (lake), and run Ibis expressions. The connection is in-memory: all state
+lives in the lake, so concurrent processes cannot conflict over a DuckDB file.
 """
 import os
 
 import ibis
 
 from config import DB, S3
-
-LOCAL_DUCKDB = "pondhouse_etl.duckdb"
 
 
 def _s3_secret_sql():
@@ -51,7 +49,7 @@ def get_conn(attach_pg=None):
     if attach_pg is None:
         attach_pg = os.getenv("ETL_ATTACH_PG", "0").lower() in ("1", "true", "yes")
 
-    con = ibis.duckdb.connect(database=LOCAL_DUCKDB)
+    con = ibis.duckdb.connect()
     _install_extension(con, "delta")
     con.raw_sql(_s3_secret_sql())
 

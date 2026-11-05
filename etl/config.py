@@ -52,5 +52,17 @@ def s3_storage_options():
     }
 
 
+# Source tables replicated through ingestion -> bronze.
+TABLES = [
+    "stores",
+    "products",
+    "customers",
+    "transactions",
+    "transaction_items",
+    "category_ref",
+    "status_ref",
+    "country_ref",
+]
+
 # 5-field cron: minute hour day month weekday
 SCHEDULE_CRON = os.getenv("ETL_SCHEDULE_CRON", "*/5 * * * *")

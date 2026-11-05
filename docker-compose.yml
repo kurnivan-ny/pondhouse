@@ -3,13 +3,13 @@
 #
 #   storage:  RustFS (S3) + Delta Lake
 #   ingest:   Sling (batch) · Debezium -> Kafka(KRaft) -> Aiven S3 sink (CDC)
-#   compute:  DuckDB via SQLMesh + Ibis
+#   compute:  DuckDB via Ibis
 #   serving:  ClickHouse    · viz: Metabase    · orchestration: Dagster
 #   monitor:  Beszel        · governance: OpenMetadata
 #
 # Quickstart:
 #   docker compose up -d                       # core stack
-#   docker compose --profile cdc up -d         # + Kafka Connect (Debezium/Aiven)
+#   docker compose --profile cdc up -d         # + Kafka + Kafka Connect (Debezium/Aiven)
 #   docker compose --profile tools up -d       # + Sling CLI container
 #   docker compose --profile monitoring up -d  # + Beszel (hub + agent)
 #   docker compose --profile governance up -d  # + OpenMetadata + Elasticsearch
@@ -21,6 +21,7 @@ services:
 
   # ---------------- Storage: RustFS (S3) ----------------
   rustfs:
+    restart: unless-stopped
     image: rustfs/rustfs:latest
     environment:
       # rustfs admin credentials (minio-compatible)
@@ -28,13 +29,13 @@ services:
       RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
       RUSTFS_CONSOLE_ENABLE: "true"
     ports:
-      - "9000:9000"    # S3 API
-      - "9001:9001"    # web console
+      - "${BIND_ADDR:-127.0.0.1}:9000:9000"    # S3 API
+      - "${BIND_ADDR:-127.0.0.1}:9001:9001"    # web console
     volumes:
       - rustfs-data:/data
 
   createbuckets:
-    image: minio/mc:latest
+    image: rustfs/rc:v0.1.36
     depends_on:
       - rustfs
     env_file: .env
@@ -42,17 +43,23 @@ services:
       - /bin/sh
       - -c
       - |
-        until mc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}"; do
+        rc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}" -q
+        until rc bucket create --ignore-existing rustfs/lake; do
           echo "waiting for rustfs..."; sleep 2;
         done
-        mc mb --ignore-existing rustfs/lake
-        mc mb --ignore-existing rustfs/cdc-landing
+        rc bucket create --ignore-existing rustfs/cdc-landing
         echo "buckets ready"
     restart: "no"
 
-  # ---------------- Kafka (KRaft mode, no ZooKeeper) ----------------
+  # ---------------- Kafka (KRaft mode, no ZooKeeper; profile: cdc) ----------------
   kafka:
     image: apache/kafka:4.0.0
+    profiles: ["cdc"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -69,7 +76,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
-      - "29092:29092"  # host access (from WSL: localhost:29092)
+      - "${BIND_ADDR:-127.0.0.1}:29092:29092"  # host access (from WSL: localhost:29092)
     volumes:
       - kafka-data:/var/lib/kafka/data
 
@@ -80,10 +87,12 @@ services:
       dockerfile: Dockerfile.connect
     profiles: ["cdc"]
     depends_on:
-      - kafka
-      - postgres
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     ports:
-      - "8083:8083"
+      - "${BIND_ADDR:-127.0.0.1}:8083:8083"
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: pondhouse-connect
@@ -97,21 +106,39 @@ services:
       CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      # Connector JSONs reference these as ${env:NAME}, so no secret is in the repo.
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
 
   # ---------------- ClickHouse (serving layer) ----------------
   clickhouse:
+    restart: unless-stopped
     image: clickhouse/clickhouse-server:25.3
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      # Read by serving/config.d/rustfs_s3.xml
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     ports:
-      - "8123:8123"    # HTTP (Metabase / SQLMesh / Ibis connect here)
-      - "9009:9000"    # native TCP (9000 is taken by RustFS)
+      - "${BIND_ADDR:-127.0.0.1}:8123:8123"    # HTTP (Metabase / Ibis connect here)
+      - "${BIND_ADDR:-127.0.0.1}:9009:9000"    # native TCP (9000 is taken by RustFS)
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./serving/initdb:/docker-entrypoint-initdb.d:ro
       - ./serving/config.d:/etc/clickhouse-server/config.d:ro
+      # A single file: the image writes its own default-user.xml to this directory.
+      - ./serving/users.d/named_collections.xml:/etc/clickhouse-server/users.d/named_collections.xml:ro
     ulimits:
       nofile:
         soft: 262144
@@ -119,16 +146,20 @@ services:
 
   # -------- Postgres: Dagster/OM/Airflow storage + demo CDC source --------
   postgres:
+    restart: unless-stopped
     image: postgres:16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # Read by orchestration/initdb/01_dbs.sh on first boot
+      OM_DB_PASSWORD: ${OM_DB_PASSWORD:-openmetadata_password}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
     command: postgres -c wal_level=logical
     ports:
       # Host port is configurable so the stack does not collide with another
       # local Postgres. In-network services always use 5432.
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "${BIND_ADDR:-127.0.0.1}:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./orchestration/initdb:/docker-entrypoint-initdb.d:ro
@@ -140,9 +171,10 @@ services:
 
   # ---------------- Metabase ----------------
   metabase:
+    restart: unless-stopped
     image: metabase/metabase:latest
     ports:
-      - "3000:3000"
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
       - metabase-data:/metabase-data
     environment:
@@ -150,12 +182,13 @@ services:
 
   # ---------------- Dagster ----------------
   dagster-webserver:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: orchestration/Dockerfile
     command: dagster-webserver -h 0.0.0.0 -p 3001 -w workspace.yaml
     ports:
-      - "3001:3001"
+      - "${BIND_ADDR:-127.0.0.1}:3001:3001"
     env_file: .env
     environment: &etl-runtime-env
       # The assets shell out to the etl/ scripts, which address the other
@@ -167,12 +200,13 @@ services:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
     volumes:
-      - dagster-home:/opt/dagster/dagster_home
+      - dagster-storage:/opt/dagster/dagster_home/storage
     depends_on:
       postgres:
         condition: service_healthy
 
   dagster-daemon:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: orchestration/Dockerfile
@@ -180,7 +214,7 @@ services:
     env_file: .env
     environment: *etl-runtime-env
     volumes:
-      - dagster-home:/opt/dagster/dagster_home
+      - dagster-storage:/opt/dagster/dagster_home/storage
     depends_on:
       postgres:
         condition: service_healthy
@@ -190,7 +224,9 @@ services:
   # services by name (postgres / rustfs / clickhouse) rather than localhost.
   #   docker compose run --rm etl python etl.py --ingest custom --no-serve
   etl:
-    build: ./etl
+    build:
+      context: ./etl
+      target: dev
     image: pondhouse-etl:latest
     profiles: ["tools"]
     env_file: .env
@@ -207,11 +243,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
 
   # ---------------- Sling CLI (profile: tools) ----------------
   # usage: docker compose --profile tools exec sling sling run ...
-  # NOTE: Sling env.yaml doesn't support ${VAR} substitution.
-  # We generate it at container startup from environment variables.
   sling:
     image: slingdata/sling:latest
     profiles: ["tools"]
@@ -222,7 +258,7 @@ services:
     volumes:
       - ./ingestion/sling:/sling
     working_dir: /sling
-    entrypoint: ["/bin/sh", "-c", "cat > /sling/env.yaml <<'EOF'\nconnections:\n  DEMO_PG:\n    type: postgres\n    host: postgres\n    port: 5432\n    user: $${POSTGRES_USER}\n    password: $${POSTGRES_PASSWORD}\n    database: demo\n  RUSTFS:\n    type: s3\n    bucket: lake\n    endpoint: http://rustfs:9000\n    access_key_id: $${S3_ACCESS_KEY}\n    secret_access_key: $${S3_SECRET_KEY}\n    region: $${S3_REGION}\nEOF\nexec sleep infinity"]
+    entrypoint: ["sleep", "infinity"]
 
   # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
   beszel:
@@ -230,7 +266,7 @@ services:
     profiles: ["monitoring"]
     restart: unless-stopped
     ports:
-      - "8090:8090"    # web UI
+      - "${BIND_ADDR:-127.0.0.1}:8090:8090"    # web UI
     volumes:
       - beszel-data:/beszel_data
     extra_hosts:
@@ -259,7 +295,7 @@ services:
       ES_JAVA_OPTS: "-Xms512m -Xmx512m"
       xpack.security.enabled: "false"
     ports:
-      - "9200:9200"
+      - "${BIND_ADDR:-127.0.0.1}:9200:9200"
     volumes:
       - es-data:/usr/share/elasticsearch/data
     healthcheck:
@@ -279,7 +315,7 @@ services:
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_USER: openmetadata_user
-      DB_USER_PASSWORD: openmetadata_password
+      DB_USER_PASSWORD: ${OM_DB_PASSWORD:-openmetadata_password}
       OM_DATABASE: openmetadata_db
       # elasticsearch
       ELASTICSEARCH_HOST: elasticsearch
@@ -292,8 +328,8 @@ services:
       PIPELINE_SERVICE_CLIENT_ENDPOINT: http://ingestion:8080
       SERVER_HOST_API_URL: http://openmetadata-server:8585/api
       AIRFLOW_USERNAME: admin
-      AIRFLOW_PASSWORD: admin
-      # auth — basic, local-dev defaults (change JWT/FERNET keys for real use)
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      # auth — basic. OM_FERNET_KEY must be set in .env for this profile
       AUTHENTICATION_PROVIDER: basic
       AUTHORIZER_ADMIN_PRINCIPALS: "[admin]"
       AUTHORIZER_INGESTION_PRINCIPALS: "[ingestion-bot]"
@@ -302,7 +338,7 @@ services:
       JWT_KEY_ID: Gb389a-9f76-gdjs-a92j-0242bk94356
       RSA_PUBLIC_KEY_FILE_PATH: ./conf/public_key.der
       RSA_PRIVATE_KEY_FILE_PATH: ./conf/private_key.der
-      FERNET_KEY: jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=
+      FERNET_KEY: ${OM_FERNET_KEY:-}
       SECRET_MANAGER: db
       OPENMETADATA_HEAP_OPTS: -Xmx1G -Xms1G
     depends_on:
@@ -317,8 +353,8 @@ services:
     restart: unless-stopped
     environment: *om-env
     ports:
-      - "8585:8585"    # UI + API  (login: admin@open-metadata.org / admin)
-      - "8586:8586"    # admin / healthcheck
+      - "${BIND_ADDR:-127.0.0.1}:8585:8585"    # UI + API  (login: admin@open-metadata.org / admin)
+      - "${BIND_ADDR:-127.0.0.1}:8586:8586"    # admin / healthcheck
     depends_on:
       postgres:
         condition: service_healthy
@@ -341,11 +377,11 @@ services:
       AIRFLOW_DB: airflow_db
       DB_USER: airflow_user
       DB_SCHEME: postgresql+psycopg2
-      DB_PASSWORD: airflow_pass
+      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
     entrypoint: /bin/bash
     command: ["/opt/airflow/ingestion_dependency.sh"]
     ports:
-      - "8080:8080"    # Airflow UI (admin / admin)
+      - "${BIND_ADDR:-127.0.0.1}:8080:8080"    # Airflow UI (admin / admin)
     volumes:
       - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
       - ingestion-volume-dags:/opt/airflow/dags
@@ -362,7 +398,7 @@ volumes:
   clickhouse-data:
   postgres-data:
   metabase-data:
-  dagster-home:
+  dagster-storage:
   beszel-data:
   es-data:
   ingestion-volume-dag-airflow:

@@ -101,13 +101,11 @@ def test_merge_leaves_no_orphaned_parquet_files(monkeypatch, delta_path):
     assert on_disk == active, f"orphaned files left behind: {on_disk - active}"
 
 
-def test_write_delta_vacuums_previous_version(monkeypatch, tmp_path):
-    """conn.write_delta must not accumulate files across overwrites."""
+def test_vacuum_delta_removes_previous_versions(tmp_path):
+    """Repeated overwrites must not accumulate parquet files."""
     import conn
 
     path = str(tmp_path / "gold_table")
-    monkeypatch.setattr(conn, "S3", {"lake_bucket": str(tmp_path)})
-    monkeypatch.setattr("config.s3_storage_options", dict, raising=False)
 
     for names in (["a", "b"], ["c", "d"], ["e", "f"]):
         deltalake.write_deltalake(path, _rows([1, 2], names),

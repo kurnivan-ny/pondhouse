@@ -1,0 +1,9 @@
+<clickhouse>
+    <!-- Lets the serving user use the `rustfs` named collection in table engines.
+         Must match CLICKHOUSE_USER in .env. -->
+    <users>
+        <default>
+            <named_collection_control>1</named_collection_control>
+        </default>
+    </users>
+</clickhouse>
