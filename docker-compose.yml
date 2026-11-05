@@ -22,7 +22,6 @@ services:
   # ---------------- Storage: RustFS (S3) ----------------
   rustfs:
     image: rustfs/rustfs:latest
-    container_name: pondhouse-rustfs
     environment:
       # rustfs admin credentials (minio-compatible)
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
@@ -35,8 +34,7 @@ services:
       - rustfs-data:/data
 
   createbuckets:
-    image: minio/mc:latest
-    container_name: pondhouse-createbuckets
+    image: rustfs/rc:v0.1.36
     depends_on:
       - rustfs
     env_file: .env
@@ -44,18 +42,17 @@ services:
       - /bin/sh
       - -c
       - |
-        until mc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}"; do
+        rc alias set rustfs http://rustfs:9000 "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}" -q
+        until rc bucket create --ignore-existing rustfs/lake; do
           echo "waiting for rustfs..."; sleep 2;
         done
-        mc mb --ignore-existing rustfs/lake
-        mc mb --ignore-existing rustfs/cdc-landing
+        rc bucket create --ignore-existing rustfs/cdc-landing
         echo "buckets ready"
     restart: "no"
 
   # ---------------- Kafka (KRaft mode, no ZooKeeper) ----------------
   kafka:
     image: apache/kafka:4.0.0
-    container_name: pondhouse-kafka
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -81,7 +78,6 @@ services:
     build:
       context: ./kafka
       dockerfile: Dockerfile.connect
-    container_name: pondhouse-connect
     profiles: ["cdc"]
     depends_on:
       - kafka
@@ -105,7 +101,6 @@ services:
   # ---------------- ClickHouse (serving layer) ----------------
   clickhouse:
     image: clickhouse/clickhouse-server:25.3
-    container_name: pondhouse-clickhouse
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
@@ -125,7 +120,6 @@ services:
   # -------- Postgres: Dagster/OM/Airflow storage + demo CDC source --------
   postgres:
     image: postgres:16
-    container_name: pondhouse-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -147,7 +141,6 @@ services:
   # ---------------- Metabase ----------------
   metabase:
     image: metabase/metabase:latest
-    container_name: pondhouse-metabase
     ports:
       - "3000:3000"
     volumes:
@@ -160,7 +153,6 @@ services:
     build:
       context: .
       dockerfile: orchestration/Dockerfile
-    container_name: pondhouse-dagster-webserver
     command: dagster-webserver -h 0.0.0.0 -p 3001 -w workspace.yaml
     ports:
       - "3001:3001"
@@ -184,7 +176,6 @@ services:
     build:
       context: .
       dockerfile: orchestration/Dockerfile
-    container_name: pondhouse-dagster-daemon
     command: dagster-daemon run -w workspace.yaml
     env_file: .env
     environment: *etl-runtime-env
@@ -201,7 +192,6 @@ services:
   etl:
     build: ./etl
     image: pondhouse-etl:latest
-    container_name: pondhouse-etl
     profiles: ["tools"]
     env_file: .env
     environment:
@@ -224,7 +214,6 @@ services:
   # We generate it at container startup from environment variables.
   sling:
     image: slingdata/sling:latest
-    container_name: pondhouse-sling
     profiles: ["tools"]
     user: "${SLING_USER:-1000:1000}"    # match host uid:gid so /sling mount is writable (sling downloads duckdb to /sling/bin)
     env_file: .env
@@ -238,7 +227,6 @@ services:
   # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
   beszel:
     image: henrygd/beszel:latest
-    container_name: pondhouse-beszel
     profiles: ["monitoring"]
     restart: unless-stopped
     ports:
@@ -250,7 +238,6 @@ services:
 
   beszel-agent:
     image: henrygd/beszel-agent:latest
-    container_name: pondhouse-beszel-agent
     profiles: ["monitoring"]
     restart: unless-stopped
     network_mode: host   # accurate host CPU/RAM/net/disk stats
@@ -266,7 +253,6 @@ services:
   # Requires vm.max_map_count=262144 on the host (see README -> Governance).
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.3.0
-    container_name: pondhouse-elasticsearch
     profiles: ["governance"]
     environment:
       discovery.type: single-node
@@ -284,7 +270,6 @@ services:
 
   openmetadata-migrate:
     image: docker.getcollate.io/openmetadata/server:${OM_VERSION}
-    container_name: pondhouse-openmetadata-migrate
     profiles: ["governance"]
     command: "./bootstrap/openmetadata-ops.sh migrate"
     environment: &om-env
@@ -328,7 +313,6 @@ services:
 
   openmetadata-server:
     image: docker.getcollate.io/openmetadata/server:${OM_VERSION}
-    container_name: pondhouse-openmetadata-server
     profiles: ["governance"]
     restart: unless-stopped
     environment: *om-env
@@ -347,7 +331,6 @@ services:
 
   ingestion:
     image: docker.getcollate.io/openmetadata/ingestion:${OM_VERSION}
-    container_name: pondhouse-ingestion
     profiles: ["governance"]
     environment:
       AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
