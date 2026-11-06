@@ -1,14 +1,12 @@
 """Ibis + DuckDB lake connection helper.
 
-Creates one DuckDB connection that can read Postgres (source), read/write Delta
-on RustFS (lake), and run Ibis expressions. The connection is in-memory: all state
-lives in the lake, so concurrent processes cannot conflict over a DuckDB file.
+Creates one DuckDB connection that can read/write Delta on RustFS (lake) and run Ibis
+expressions. The connection is in-memory: all state lives in the lake, so concurrent
+processes cannot conflict over a DuckDB file.
 """
-import os
-
 import ibis
 
-from config import DB, S3
+from config import S3
 
 
 def _s3_secret_sql():
@@ -21,15 +19,6 @@ def _s3_secret_sql():
     )
 
 
-def _pg_attach_sql():
-    return (
-        "ATTACH"
-        f" 'host={DB['host']} port={DB['port']} dbname={DB['dbname']}"
-        f" user={DB['user']} password={DB['password']}'"
-        " AS pg (TYPE postgres, READ_ONLY);"
-    )
-
-
 def _install_extension(con, name):
     """Install and load a DuckDB extension with error handling."""
     try:
@@ -38,32 +27,12 @@ def _install_extension(con, name):
         raise RuntimeError(f"Failed to install/load DuckDB extension '{name}': {e}") from e
 
 
-def get_conn(attach_pg=None):
-    """Return an Ibis DuckDB connection wired for S3 Delta (and optionally Postgres).
-
-    Only the ingestion step reads Postgres; bronze/silver/gold/mart work purely
-    on the lake. Attaching unconditionally makes those steps fail whenever
-    Postgres is down, so the attach is opt-in. Default: attach only when
-    ETL_ATTACH_PG is truthy, and never fail the connection if it does not work.
-    """
-    if attach_pg is None:
-        attach_pg = os.getenv("ETL_ATTACH_PG", "0").lower() in ("1", "true", "yes")
-
+def get_conn():
+    """Return an Ibis DuckDB connection wired for S3 Delta."""
     con = ibis.duckdb.connect()
     _install_extension(con, "delta")
     con.raw_sql(_s3_secret_sql())
-
-    if attach_pg:
-        _install_extension(con, "postgres")
-        con.raw_sql(_pg_attach_sql())
     return con
-
-
-def read_pg(con, table, schema="pos"):
-    """Read a Postgres table through the attached connection as an Ibis table."""
-    view = f"src_{table}"
-    con.raw_sql(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM pg.{schema}.{table};")
-    return con.table(view)
 
 
 def read_parquet(con, path, table_name):

@@ -1,7 +1,8 @@
-"""Serving step: create ClickHouse marts tables that read Delta from RustFS.
+"""Serving step: load the gold + mart Delta tables into native ClickHouse tables.
 
-Applies ../serving/delta_marts.sql to ClickHouse after the transform step,
-so Metabase can query the gold star schema + data marts.
+Each table is built under a temporary name, then swapped in with EXCHANGE TABLES. The
+swap is atomic, so queries never see a half-loaded table, and a failed build leaves the
+previous data serving. Once loaded, the marts do not need RustFS to answer queries.
 
 Statements are sent over the ClickHouse HTTP interface, so this works the same
 on the host and inside a container (no docker socket / docker CLI required).
@@ -13,34 +14,26 @@ import os
 import urllib.error
 import urllib.request
 
-SQL_FILE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "serving", "delta_marts.sql")
-)
-
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_PORT = os.getenv("CLICKHOUSE_PORT", "8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "pondhouse")
 
+# As ClickHouse reaches the lake, inside the compose network. Credentials come from
+# the `rustfs` named collection (serving/config.d/rustfs_s3.xml).
+LAKE_URL = "http://rustfs:9000/lake"
 
-def _strip_comments(sql):
-    lines = []
-    for line in sql.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("--"):
-            continue
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def split_statements(sql):
-    """Split a .sql file into individual statements.
-
-    ClickHouse's HTTP endpoint executes one statement per request, so the file
-    is split on semicolons (the marts DDL contains no string literals or
-    dollar-quoted bodies that would need a real parser).
-    """
-    return [s.strip() for s in _strip_comments(sql).split(";") if s.strip()]
+# Served table -> (lake layer, ClickHouse sort key)
+MARTS = {
+    "dim_customer": ("gold", "customer_key"),
+    "dim_product": ("gold", "product_key"),
+    "dim_store": ("gold", "store_key"),
+    "dim_date": ("gold", "date_key"),
+    "fact_sales": ("gold", "(date_key, item_key)"),
+    "daily_sales_mart": ("mart", "(date_key, store_name)"),
+    "product_sales_mart": ("mart", "(category, product_name)"),
+    "customer_sales_mart": ("mart", "customer_key"),
+}
 
 
 def execute(statement, timeout=120):
@@ -67,14 +60,31 @@ def execute(statement, timeout=120):
         ) from e
 
 
-def run_serve():
-    with open(SQL_FILE, "r", encoding="utf-8") as f:
-        sql = f.read()
+def serve_table(table):
+    """Rebuild one served table from the lake and swap it in atomically."""
+    layer, sort_key = MARTS[table]
+    target = f"marts.{table}"
+    new = f"marts.{table}__new"
 
-    statements = split_statements(sql)
-    for statement in statements:
-        execute(statement)
-    print(f"clickhouse marts tables created ({len(statements)} statements applied)")
+    execute("CREATE DATABASE IF NOT EXISTS marts")
+    # A build that died earlier may have left this behind.
+    execute(f"DROP TABLE IF EXISTS {new}")
+    # Delta columns arrive as Nullable, hence allow_nullable_key.
+    execute(
+        f"CREATE TABLE {new} ENGINE = MergeTree ORDER BY {sort_key} "
+        "SETTINGS allow_nullable_key = 1 AS "
+        f"SELECT * FROM deltaLake(rustfs, url = '{LAKE_URL}/{layer}/{table}/')"
+    )
+    # EXCHANGE needs both tables to exist; on the first run the target does not.
+    execute(f"CREATE TABLE IF NOT EXISTS {target} AS {new}")
+    execute(f"EXCHANGE TABLES {new} AND {target}")
+    execute(f"DROP TABLE {new}")
+    print(f"marts.{table} swapped in")
+
+
+def run_serve():
+    for table in MARTS:
+        serve_table(table)
 
 
 if __name__ == "__main__":

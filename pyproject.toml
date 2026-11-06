@@ -11,6 +11,7 @@ dependencies = [
     "ibis-framework[duckdb]>=12.0",
     "psycopg2-binary>=2.9",
     "pyarrow>=26.0",
+    "sling>=1.6",
     # sqlglot 30.18 reads Drop's table from `tables`, but Ibis 12.0 passes `this`, so
     # every Ibis DROP renders with no name (see CLAUDE.md).
     "sqlglot<30.18",

@@ -4,7 +4,6 @@ Each test pins a bug that was live in transform.py: stale table references that
 survive a join, a dedup that dropped rows instead of selecting survivors, and a
 status filter applied to the wrong relation.
 """
-from datetime import datetime
 
 import pandas as pd
 import pytest
@@ -121,7 +120,7 @@ def test_total_revenue_is_exact(built):
 
 
 def test_duplicated_bronze_does_not_multiply_revenue(lake, monkeypatch):
-    """Running --mode append twice leaves every bronze row twice."""
+    """A source with every row twice must not change the result."""
     import conftest
 
     for table, rows in conftest.BRONZE.items():
@@ -134,21 +133,6 @@ def test_duplicated_bronze_does_not_multiply_revenue(lake, monkeypatch):
     fact = lake.df("gold", "fact_sales")
     assert fact["item_key"].is_unique
     assert fact["line_amount"].sum() == pytest.approx(1397.99)
-
-
-def test_dedupe_keeps_newest_loaded_at_version(lake):
-    """A row re-read after an update must win over its older appended copy."""
-    t = lake.con.create_table(
-        "appended",
-        [
-            {"store_id": 1, "store_name": "old", "_loaded_at": datetime(2026, 1, 1)},
-            {"store_id": 1, "store_name": "new", "_loaded_at": datetime(2026, 1, 2)},
-            {"store_id": 2, "store_name": "only", "_loaded_at": datetime(2026, 1, 1)},
-        ],
-    )
-    got = transform._dedupe(t, "store_id").to_pandas().set_index("store_id")
-    assert got.loc[1, "store_name"] == "new"
-    assert len(got) == 2
 
 
 # --- gold ------------------------------------------------------------------
@@ -203,3 +187,28 @@ def test_marts_have_no_duplicate_grain(built):
     assert not daily.duplicated(subset=["date_key", "store_name"]).any()
     cust = built.df("mart", "customer_sales_mart")
     assert not cust.duplicated(subset=["customer_key"]).any()
+
+
+# --- registry ---------------------------------------------------------------
+
+def test_every_transform_declares_exactly_the_tables_it_reads(built, monkeypatch):
+    """Dagster orders the assets from these deps, so a missing one would let a table
+    build from stale data."""
+    for spec in transform.TRANSFORMS:
+        reads = set()
+
+        def recording_read(con, layer, table, reads=reads):
+            reads.add((layer, table))
+            return built.read(con, layer, table)
+
+        monkeypatch.setattr(transform, "_read", recording_read)
+        spec.build(built.con)
+        assert reads == set(spec.deps), f"{spec.layer}.{spec.table}"
+
+
+def test_transforms_are_listed_after_their_dependencies():
+    built_so_far = set()
+    for spec in transform.TRANSFORMS:
+        lake_deps = {dep for dep in spec.deps if dep[0] != "bronze"}
+        assert lake_deps <= built_so_far, f"{spec.layer}.{spec.table}"
+        built_so_far.add((spec.layer, spec.table))

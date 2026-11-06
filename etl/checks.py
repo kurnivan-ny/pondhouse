@@ -7,14 +7,12 @@ Usage:
 """
 import argparse
 import json
-import sys
 
+import serve
 import transform
 from config import S3, TABLES
-from conn import get_conn, read_delta, read_parquet
+from conn import get_conn, read_parquet
 
-GOLD_TABLES = ["dim_customer", "dim_product", "dim_store", "dim_date", "fact_sales"]
-MART_TABLES = ["daily_sales_mart", "product_sales_mart", "customer_sales_mart"]
 FACT_FOREIGN_KEYS = [
     ("customer_key", "dim_customer"),
     ("product_key", "dim_product"),
@@ -25,6 +23,12 @@ FACT_FOREIGN_KEYS = [
 
 def _count(table):
     return int(table.count().execute())
+
+
+def check_table_rows(read, layer, table):
+    """One source table must have rows in `layer`."""
+    rows = _count(read(layer, table))
+    return {"passed": rows > 0, "metadata": {"rows": rows}}
 
 
 def check_row_counts(read, layer):
@@ -69,45 +73,64 @@ def check_gold(read):
     }
 
 
+def check_served_table(read, table, clickhouse_count):
+    """A ClickHouse table must serve the same row count as its Delta table."""
+    layer, _sort_key = serve.MARTS[table]
+    delta = _count(read(layer, table))
+    served = clickhouse_count(table)
+    return {"passed": delta == served, "metadata": {"delta": delta, "clickhouse": served}}
+
+
 def check_marts(read, clickhouse_count):
-    """Each ClickHouse table must serve the same row count as its Delta table."""
-    expected = {t: _count(read("gold", t)) for t in GOLD_TABLES}
-    expected.update({t: _count(read("mart", t)) for t in MART_TABLES})
-    served = {t: clickhouse_count(t) for t in expected}
-    mismatched = [t for t in expected if expected[t] != served[t]]
+    """Every ClickHouse table must serve the same row count as its Delta table."""
+    results = {t: check_served_table(read, t, clickhouse_count) for t in serve.MARTS}
+    mismatched = [t for t, result in results.items() if not result["passed"]]
     return {
         "passed": not mismatched,
-        "metadata": {"delta": expected, "clickhouse": served, "mismatched": mismatched},
+        "metadata": {
+            "delta": {t: result["metadata"]["delta"] for t, result in results.items()},
+            "clickhouse": {t: result["metadata"]["clickhouse"] for t, result in results.items()},
+            "mismatched": mismatched,
+        },
     }
 
 
-def _read_ingestion(con):
-    """The ingestion layer is Delta (custom path) or parquet (Sling path)."""
-    def read(_layer, table):
-        path = f"s3://{S3['lake_bucket']}/ingestion/{table}"
-        try:
-            return read_delta(con, path, f"ingestion_{table}")
-        except Exception:
-            return read_parquet(con, f"{path}.parquet", f"ingestion_{table}")
+def _clickhouse_count(table):
+    return int(serve.execute(f"SELECT count() FROM marts.{table}").strip())
+
+
+def lake_reader(con):
+    """read(layer, table) over the lake: Sling's parquet landing, Delta after that."""
+    def read(layer, table):
+        if layer == "ingestion":
+            path = f"s3://{S3['lake_bucket']}/ingestion/{table}.parquet"
+            return read_parquet(con, path, f"ingestion_{table}")
+        return transform._read(con, layer, table)
     return read
 
 
-def _clickhouse_count(table):
-    import serve
+def run_table_rows(layer, table):
+    con = get_conn()
+    try:
+        return check_table_rows(lake_reader(con), layer, table)
+    finally:
+        con.disconnect()
 
-    return int(serve.execute(f"SELECT count() FROM marts.{table}").strip())
+
+def run_served_table(table):
+    con = get_conn()
+    try:
+        return check_served_table(lake_reader(con), table, _clickhouse_count)
+    finally:
+        con.disconnect()
 
 
 def run(layer):
     con = get_conn()
     try:
-        def read(lake_layer, table):
-            return transform._read(con, lake_layer, table)
-
-        if layer == "ingestion":
-            return check_row_counts(_read_ingestion(con), "ingestion")
-        if layer == "bronze":
-            return check_row_counts(read, "bronze")
+        read = lake_reader(con)
+        if layer in ("ingestion", "bronze"):
+            return check_row_counts(read, layer)
         if layer == "gold":
             return check_gold(read)
         return check_marts(read, _clickhouse_count)
@@ -119,9 +142,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("layer", choices=["ingestion", "bronze", "gold", "marts"])
     args = parser.parse_args()
-    result = run(args.layer)
-    print(json.dumps(result))
-    sys.exit(0)
+    print(json.dumps(run(args.layer)))
 
 
 if __name__ == "__main__":

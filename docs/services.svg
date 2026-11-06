@@ -40,7 +40,7 @@
   <text x="564" y="66" class="h" fill="#475569">PROFILES — --profile &lt;name&gt;</text>
 
   <rect x="566" y="80" width="292" height="34" class="card" fill="#ecfeff" stroke="#a5f3fc"/>
-  <text x="580" y="102" class="n" fill="#155e75">tools — Sling CLI + etl runner</text>
+  <text x="580" y="102" class="n" fill="#155e75">tools — etl runner (with Sling)</text>
 
   <rect x="566" y="122" width="292" height="34" class="card" fill="#f0fdf4" stroke="#bbf7d0"/>
   <text x="580" y="144" class="n" fill="#166534">cdc — Kafka 29092 + Connect 8083</text>

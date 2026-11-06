@@ -5,3 +5,8 @@
 **/*.pyc
 **/*.duckdb
 **/.pytest_cache
+ingestion/sling/bin
+ingestion/sling/.cache
+ingestion/sling/.duckdb
+ingestion/sling/.sling
+ingestion/sling/executions
