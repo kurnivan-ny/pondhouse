@@ -426,6 +426,84 @@ docker run --rm -v "$PWD:/w" -w /w -u "$(id -u):$(id -g)" -e UV_CACHE_DIR=/tmp/u
 Dependabot proposes weekly updates for Python, images and GitHub Actions; CI, including
 the end-to-end smoke tests and a blocking vulnerability scan, decides if they are safe.
 
+## Testing
+
+```bash
+# Unit tests; REQUIRE_CLICKHOUSE=1 makes the parity tests fail rather than skip
+docker compose up -d --wait clickhouse
+docker compose --profile tools run --rm --build -e REQUIRE_CLICKHOUSE=1 \
+  -e CLICKHOUSE_HOST=clickhouse etl python -m pytest tests/ -q
+
+# End to end. Each uses its own compose project and volumes, with no published ports, so
+# it's safe next to a live stack and cleans up after itself.
+bash scripts/smoke_test.sh    # pipeline, Dagster, customer changes, refunds, a lake outage
+bash scripts/smoke_cdc.sh     # Postgres -> Kafka -> parquet -> incremental bronze
+bash scripts/smoke_ops.sh     # Metabase migration, backup and restore, alerts
+bash scripts/smoke_deploy.sh  # deploy, upgrade, rollback
+```
+
+The seed data must give exactly **6 fact rows and 1656.50 revenue**, until a test adds more.
+The smoke tests fit in 8 GB of RAM, with `smoke_ops.sh` the heaviest because Metabase takes
+about 1.4 GB. Other stacks running alongside can use that up, so check `free -m` first.
+CI runs all of this, plus lint, image builds and scans. It's the real test, because a local
+run can hide problems through cached images.
+
+## Known issues
+
+**Pinned on purpose** (Dependabot is told to leave these alone; remove both together):
+- `sqlglot<30.18`: later versions read a `DROP`'s table from `tables` while Ibis 12.0 passes
+  `this`, so Ibis renders `DROP VIEW IF EXISTS` with no name. The pipeline doesn't use that
+  path, so smoke tests pass without the pin and only the unit tests catch it.
+- `sqlalchemy<2.1`: 2.1 defaults to psycopg v3, which isn't installed, so Dagster fails on startup.
+
+**Accepted security findings.** Trivy blocks CI on `etl` and `dagster`, but only reports two
+things, as both are libraries inside the latest upstream releases. Recheck them when upgrading:
+- The Sling binary (42 HIGH/CRITICAL). It runs only for ingestion and opens no ports.
+- The `connect` image (76 HIGH/CRITICAL). It listens on localhost only.
+
+**ClickHouse**
+- The user in `serving/users.d/named_collections.xml` must match `CLICKHOUSE_USER`. Version 26.3
+  also needs `show_named_collections_secrets`, which lets that user read the S3 credentials.
+- `DateTime` silently clamps to 1970-2106, so the customer history's date limits stay inside it.
+- Ibis has no MD5 for ClickHouse, so keys are arithmetic rather than hashes.
+
+**Sling**
+- Image tags need a `v` prefix: `v1.6.5` exists, `1.6.5` doesn't.
+- The PyPI package fetches its binary, and Sling fetches DuckDB, on first use. The Dockerfiles
+  bake both in, so runs need no internet.
+- Without `SLING_ALLOW_EMPTY`, a source table that becomes empty keeps its old parquet. With no
+  matching source tables at all, Sling exits 0 having done nothing.
+
+**CDC**
+- Debezium's delete tombstones crash the Aiven parquet sink, hence `tombstones.on.delete: false`.
+- A connector can say `RUNNING` while its task has `FAILED`, so check the task's state.
+- In the Aiven sink, `file.name.prefix` is ignored when a template is set, so `cdc/` is in
+  `file.name.template`. The legacy `aws.s3.prefix` setting overrides the template.
+
+**Metabase**
+- `MB_DB_FILE=/metabase-data/metabase.db` creates a folder, so the H2 path is
+  `/metabase-data/metabase.db/metabase.db`. The image's entrypoint also drops the argument of
+  `load-from-h2`, so `scripts/migrate_metabase_h2.sh` runs `java` directly as uid 2000.
+
+**Dagster**
+- `dagster.yaml` must live in `$DAGSTER_HOME`; otherwise it silently uses SQLite.
+- Run sensors only watch their own code location unless told otherwise, and a run from
+  `dagster asset materialize -m` counts as a different one.
+- `TRANSFORMS` in `etl/transform.py` declares each table's reads, and Dagster orders assets from
+  it. A unit test fails if a declaration differs from what the code reads.
+
+**Tooling**
+- Gitleaks scans commits, not the working tree, so run it after committing and before pushing.
+- `docker manifest inspect` gave false negatives here. Test an image with a real `docker pull`,
+  and retry IPv6 "network is unreachable" errors before deciding an image is gone.
+- On Windows + WSL, run git from inside WSL: Windows git with `autocrlf=true` rewrites files to CRLF.
+- JVM services need a heap cap below their `mem_limit`. Connect used 2.1 GB by default.
+
+**Not verified**
+- The `governance` and `monitoring` profiles have never been run, only their compose config.
+- Connecting Metabase to the marts through its UI. Its image does bundle the ClickHouse driver.
+- The deploy job on a real self-hosted runner.
+
 ## Overlapping components (by design)
 
 - **Dagster vs OM's Airflow** — same category, different scope. The Airflow inside the

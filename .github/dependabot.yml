@@ -7,7 +7,7 @@ updates:
     groups:
       python:
         patterns: ["*"]
-    # Pinned on purpose; see "Gotchas" in CLAUDE.md. Remove when the upstream issue is fixed.
+    # Pinned on purpose; see "Known issues" in README.md. Remove with the pin.
     ignore:
       - dependency-name: sqlalchemy
         versions: [">=2.1"]

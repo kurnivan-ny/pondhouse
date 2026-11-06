@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 460" width="820" height="460" role="img" aria-labelledby="t d">
   <title id="t">Gold layer star schema</title>
-  <desc id="d">fact_sales at the centre joins to dim_customer, dim_product, dim_store and dim_date on their surrogate keys.</desc>
+  <desc id="d">fact_sales at the centre joins to dim_customer, dim_product, dim_store and dim_date on their keys. fact_refunds shares those keys and points to the sale it refunds.</desc>
 
   <style>
     .tbl  { font: 700 12px ui-sans-serif, system-ui, sans-serif; }
@@ -28,7 +28,7 @@
   <text x="128" y="77" class="tbl" fill="#1e3a8a" text-anchor="middle">dim_customer</text>
   <text x="54" y="102" class="pk" fill="#1d4ed8">customer_key</text>
   <text x="54" y="120" class="col" fill="#475569">full_name, email</text>
-  <text x="54" y="138" class="col" fill="#475569">country, signup_date</text>
+  <text x="54" y="138" class="col" fill="#475569">country, valid_from/to</text>
 
   <!-- dim_product (right) -->
   <rect x="604" y="60" width="176" height="96" class="card" fill="#f0fdf4" stroke="#86efac"/>
@@ -51,7 +51,7 @@
   <rect x="604" y="304" width="176" height="24" rx="8" fill="#d8b4fe"/>
   <text x="692" y="321" class="tbl" fill="#581c87" text-anchor="middle">dim_date</text>
   <text x="618" y="346" class="pk" fill="#7e22ce">date_key</text>
-  <text x="618" y="364" class="col" fill="#475569">transaction_date</text>
+  <text x="618" y="364" class="col" fill="#475569">quarter, month_name</text>
   <text x="618" y="382" class="col" fill="#475569">year, month, day</text>
 
   <!-- relations -->
@@ -60,5 +60,6 @@
   <path class="rel" d="M 216 344 C 268 334, 280 282, 316 264"/>
   <path class="rel" d="M 604 344 C 552 334, 540 282, 504 264"/>
 
-  <text x="410" y="430" class="col" fill="#94a3b8" text-anchor="middle">gold layer — Delta on RustFS, exposed to ClickHouse as marts.*</text>
+  <text x="410" y="412" class="col" fill="#57534e" text-anchor="middle">fact_refunds: same keys, plus refund_key, item_key, amount</text>
+  <text x="410" y="434" class="col" fill="#94a3b8" text-anchor="middle">gold layer — Delta on RustFS, loaded into ClickHouse as marts.*</text>
 </svg>
