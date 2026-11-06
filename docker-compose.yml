@@ -172,7 +172,7 @@ services:
   # ---------------- Metabase ----------------
   metabase:
     restart: unless-stopped
-    image: metabase/metabase:v0.65.2
+    image: metabase/metabase:v0.65.2.6
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
