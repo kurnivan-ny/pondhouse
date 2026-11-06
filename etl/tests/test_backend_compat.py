@@ -14,16 +14,21 @@ import transform
 
 
 LAYERS = [
-    ("silver", "customers"), ("silver", "products"), ("silver", "stores"),
-    ("silver", "transactions"), ("silver", "sales"), ("silver", "rejected_sales"),
+    ("silver", "customers"), ("silver", "customer_history"), ("silver", "products"),
+    ("silver", "stores"), ("silver", "transactions"), ("silver", "sales"),
+    ("silver", "rejected_sales"), ("silver", "refunds"), ("silver", "rejected_refunds"),
     ("gold", "dim_customer"), ("gold", "dim_product"), ("gold", "dim_store"),
-    ("gold", "dim_date"), ("gold", "fact_sales"),
+    ("gold", "dim_date"), ("gold", "fact_sales"), ("gold", "fact_refunds"),
     ("mart", "daily_sales_mart"), ("mart", "product_sales_mart"),
     ("mart", "customer_sales_mart"),
 ]
 
 SORT_KEYS = {
     ("silver", "customers"): ["customer_id"],
+    ("silver", "customer_history"): ["customer_id", "valid_from"],
+    ("silver", "refunds"): ["refund_id"],
+    ("silver", "rejected_refunds"): ["refund_id"],
+    ("gold", "fact_refunds"): ["refund_key"],
     ("silver", "products"): ["product_id"],
     ("silver", "stores"): ["store_id"],
     ("silver", "transactions"): ["transaction_id"],

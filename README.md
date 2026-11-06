@@ -89,6 +89,7 @@ pondhouse/
 | `BIND_ADDR` | Interface all ports publish on | `127.0.0.1` |
 | `ETL_SCHEDULE_CRON` | Dagster + APScheduler cadence | `*/5 * * * *` |
 | `ALERT_WEBHOOK_URL` | Dagster failure alerts (Slack or Discord webhook) | *(empty: only logged)* |
+| `INGESTION_MODE` | `snapshot` (Sling) or `cdc` (merge Debezium events) | `snapshot` |
 | `BESZEL_AGENT_KEY` | Beszel agent auth | *(paste from Beszel UI)* |
 | `OM_VERSION` | OpenMetadata + ingestion image tag | `1.13.3` |
 | `OM_FERNET_KEY` | OpenMetadata secret key; **required** for `governance` | *(generate)* |
@@ -116,6 +117,14 @@ holds a real secret.
   unused, and can be deleted once you don't need them.
 - The next `serve.py` or Dagster run replaces each `marts.*` table with a native one. This
   leaves the lake data untouched, and table and column names stay the same.
+- **The data model changed (customer history, refunds, calendar).** Before the next run,
+  create the new source table by re-running the seed, which is safe on existing data:
+  `docker compose exec -T postgres psql -U pondhouse -d demo -v ON_ERROR_STOP=1 < etl/sql/00_init.sql`.
+  - Customer history starts at this run, since nothing recorded earlier changes.
+  - `customer_key` values change, and `marts.dim_date` has new columns (`transaction_date` is
+    gone; use `date_key`). Check Metabase questions that filter on these.
+  - If CDC is running, update its connector, or the first source `DELETE` stops all landing:
+    `curl -X PUT http://localhost:8083/connectors/demo-postgres-cdc/config -H "Content-Type: application/json" -d "$(python3 -c 'import json; print(json.dumps(json.load(open("kafka/connectors/debezium-postgres.json"))["config"]))')"`.
 - Dagster now has one asset per table, so old assets such as `bronze_layer` stay in its
   history but are no longer built.
 - **Metabase moved from its H2 file to Postgres.** To keep your dashboards, run this
@@ -294,8 +303,10 @@ schema:
 - **`bronze`** — raw **Delta** copy + `_ingested_at` (`etl/bronze.py`), from the Sling
   parquet landing (`pos.*` → `s3://lake/ingestion/{table}.parquet`).
 - **`silver`** — **translate** (join lookups → names), **cleanse**, **deduplicate**;
-  rows that can't become a sale are kept in `silver.rejected_sales`.
-- **`gold`** — star schema (`dim_customer`/`dim_product`/`dim_store`/`dim_date`, `fact_sales`).
+  rows that can't become a sale or refund are kept in `rejected_sales` and `rejected_refunds`.
+  `customer_history` records every version of every customer.
+- **`gold`** — star schema (`dim_customer` with history, `dim_product`, `dim_store`, a
+  full-calendar `dim_date`, `fact_sales`, `fact_refunds`).
 - **`mart`** — data marts (`daily_sales_mart`, `product_sales_mart`, `customer_sales_mart`).
 - **`marts`** — native ClickHouse tables loaded from gold + mart by `etl/serve.py`. Each
   one is built separately and swapped in atomically, so a failed load leaves the old data

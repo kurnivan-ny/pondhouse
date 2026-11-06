@@ -92,6 +92,11 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, all four smoke tests, image bu
 - The deployed stack's project name is `pondhouse`, which is also the default for a clone
   with that directory name. Running compose in such a clone would replace deployed containers.
 - `deploy.sh` rollback restores images and config, not data; schema changes need `restore.sh`.
+- Debezium's delete tombstones crash the Aiven parquet sink, and its connector still says
+  `RUNNING` with a `FAILED` task, which stops all landing. Hence `tombstones.on.delete: false`.
+- ClickHouse's `DateTime` silently clamps to 1970-2106, so SCD date sentinels stay inside it.
+- Ibis 12 has no MD5 on ClickHouse, so keys are arithmetic: see `CUSTOMER_KEY_FACTOR`.
+- `silver.customer_history` is stateful and can't be rebuilt from the source.
 - Metabase v0.65's image bundles the ClickHouse driver (seen in its startup log), so it needs
   no plugin. Connecting it to the marts through the UI has not been tried.
 - Metabase's `MB_DB_FILE=/metabase-data/metabase.db` creates a folder, so the H2 path is
@@ -123,16 +128,13 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, all four smoke tests, image bu
 | 3. Upgrades | `uv` + lockfile, Dagster 1.13, Ibis 12, DuckDB 2.0, deltalake 1.6, pyarrow 26, ClickHouse 26.3, pinned images, Dependabot | Done, PR #4 merged |
 | 4. Architecture | Native ClickHouse marts swapped in with `EXCHANGE TABLES`, one Dagster asset per table calling Python directly, Sling installed in the image as the only ingestion path | Done, PR #11 merged |
 | 5. Operations | Backups (`pg_dump` + lake bucket), Dagster failure alerts, Metabase on Postgres, memory limits | Done, PRs #12 and #13 merged |
-| 6. Deploy to WSL | Publish images to GHCR, self-hosted runner deploys on merge to `main` | Branch `feat/stage-6-deploy`, `deploy.sh` tested locally; workflows and the runner have **never run** |
-| 7. Data model | Surrogate keys, SCD Type 2 customers, full-calendar `dim_date`, refunds, incremental loads, CDC into bronze | Not started, largest stage; owner may skip it |
+| 6. Deploy to WSL | Publish images to GHCR, self-hosted runner deploys on merge to `main` | Merged in PR #14. `deploy.sh` is tested; the deploy job and runner have **never run** |
+| 7. Data model | Surrogate keys, SCD Type 2 customers, full-calendar `dim_date`, refunds, incremental loads, CDC into bronze | Branch `feat/stage-7-data-model`, tested locally, **PR not opened yet** |
 
 ## Next steps
 
-1. Open the stage 6 PR, confirm CI passes, and merge it. That first publishes images to GHCR.
-2. The owner sets up the runner: see "Deploying" in `README.md`. A token comes from GitHub
-   settings, and the fork approval setting must be on first. The first real deploy is the
-   first test of the workflows, the GHCR pull and the runner.
-3. Stage 7 is the largest, and the owner may skip it.
+1. Open the stage 7 PR, confirm CI passes, and merge it.
+2. The owner sets up the runner: see "Deploying" in `README.md`.
 
 ## Upgrading an existing install
 

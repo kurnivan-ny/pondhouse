@@ -10,7 +10,7 @@ import json
 
 import serve
 import transform
-from config import S3, TABLES
+from config import INGESTION_MODE, OPTIONAL_TABLES, S3, TABLES
 from conn import get_conn, read_parquet
 
 FACT_FOREIGN_KEYS = [
@@ -34,7 +34,7 @@ def check_table_rows(read, layer, table):
 def check_row_counts(read, layer):
     """Every source table must have rows in `layer`."""
     counts = {table: _count(read(layer, table)) for table in TABLES}
-    empty = [table for table, n in counts.items() if n == 0]
+    empty = [table for table, n in counts.items() if n == 0 and table not in OPTIONAL_TABLES]
     return {"passed": not empty, "metadata": {"row_counts": counts, "empty_tables": empty}}
 
 
@@ -50,6 +50,17 @@ def check_gold(read):
         key: _count(fact.anti_join(read("gold", dim), key))
         for key, dim in FACT_FOREIGN_KEYS
     }
+    refunds = read("gold", "fact_refunds")
+    refund_orphans = {
+        key: _count(refunds.anti_join(read("gold", dim), key))
+        for key, dim in FACT_FOREIGN_KEYS
+    }
+    refunds_of_unknown_items = _count(refunds.anti_join(fact, "item_key"))
+    current_per_customer = read("gold", "dim_customer")
+    current_per_customer = current_per_customer.filter(current_per_customer.is_current)
+    customers_without_one_current_version = (
+        _count(current_per_customer) - int(current_per_customer.customer_id.nunique().execute())
+    )
     fact_revenue = float(fact.line_amount.sum().execute() or 0)
     silver_revenue = float(sales.line_amount.sum().execute() or 0)
     rejected = _count(read("silver", "rejected_sales"))
@@ -59,12 +70,18 @@ def check_gold(read):
             rows > 0
             and duplicates == 0
             and not any(orphans.values())
+            and not any(refund_orphans.values())
+            and refunds_of_unknown_items == 0
+            and customers_without_one_current_version == 0
             and round(fact_revenue - silver_revenue, 2) == 0
         ),
         "metadata": {
             "rows": rows,
             "duplicate_item_keys": duplicates,
             "orphan_keys": orphans,
+            "refund_orphan_keys": refund_orphans,
+            "refunds_of_unknown_items": refunds_of_unknown_items,
+            "customers_without_one_current_version": customers_without_one_current_version,
             "fact_revenue": round(fact_revenue, 2),
             "silver_revenue": round(silver_revenue, 2),
             # Rejections are for inspection: they do not fail the check.
@@ -110,6 +127,8 @@ def lake_reader(con):
 
 
 def run_table_rows(layer, table):
+    if layer == "ingestion" and INGESTION_MODE == "cdc":
+        return {"passed": True, "metadata": {"skipped": "INGESTION_MODE=cdc lands no parquet"}}
     con = get_conn()
     try:
         return check_table_rows(lake_reader(con), layer, table)
@@ -126,6 +145,8 @@ def run_served_table(table):
 
 
 def run(layer):
+    if layer == "ingestion" and INGESTION_MODE == "cdc":
+        return {"passed": True, "metadata": {"skipped": "INGESTION_MODE=cdc lands no parquet"}}
     con = get_conn()
     try:
         read = lake_reader(con)

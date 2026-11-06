@@ -73,6 +73,14 @@ BRONZE = {
         # invalid product 8 -> rejected, and visible in silver.rejected_sales
         (9, 6, 8, 1, -1.00),
     ],
+    "refunds": [
+        # refund_id, item_id, refund_date, quantity, amount, reason
+        (1, 1, "2026-08-10", 1, 200.00, "damaged"),
+        # more than the 37.50 item 3 sold for -> rejected
+        (2, 3, "2026-08-11", 1, 1000.00, "too much"),
+        # no such item -> rejected
+        (3, 99, "2026-08-12", 1, 5.00, "unknown item"),
+    ],
     "category_ref": [("ELEC", "electronics"), ("ACCESS", "accessories")],
     "status_ref": [("C", "completed"), ("P", "pending"), ("X", "cancelled")],
     "country_ref": [("SG", "Singapore"), ("MY", "Malaysia")],
@@ -98,6 +106,10 @@ SCHEMAS = {
         item_id="int64", transaction_id="int64", product_id="int64",
         quantity="int64", unit_price="float64",
     ),
+    "refunds": dict(
+        refund_id="int64", item_id="int64", refund_date="date",
+        quantity="int64", amount="float64", reason="string",
+    ),
     "category_ref": dict(category_code="string", category_name="string"),
     "status_ref": dict(status_code="string", status_name="string"),
     "country_ref": dict(country_code="string", country_name="string"),
@@ -121,6 +133,10 @@ def _rows_as_dicts(table):
     return rows
 
 
+# Later than every date in BRONZE, like a real run of the pipeline.
+FIRST_RUN = "2026-09-15 12:00:00"
+
+
 class Lake:
     """In-memory stand-in for the Delta lake: layer/table -> ibis table."""
 
@@ -141,6 +157,9 @@ class Lake:
     def read(self, _con, layer, table):
         return self.tables[(layer, table)]
 
+    def exists(self, _con, layer, table):
+        return (layer, table) in self.tables
+
     def write(self, con, expr, layer, table):
         # Materialize exactly like write_delta does, so an expression that only
         # fails at execution time (stale table refs, missing columns) fails here.
@@ -158,6 +177,8 @@ def _make_lake(con, monkeypatch):
     lake.seed_bronze()
     monkeypatch.setattr(transform, "_read", lake.read)
     monkeypatch.setattr(transform, "write_delta", lake.write)
+    monkeypatch.setattr(transform, "_exists", lake.exists)
+    monkeypatch.setattr(transform, "_now", lambda: ibis.timestamp(FIRST_RUN))
     return lake
 
 

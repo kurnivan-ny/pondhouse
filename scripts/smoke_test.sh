@@ -79,11 +79,11 @@ compose exec -T -w /opt/dagster -e PYTHONPATH=/opt/dagster dagster-webserver \
 check_marts "dagster"
 assert_eq "dagster run stored in postgres" "1" \
   "$(psql_dagster "SELECT count(*) FROM runs WHERE status = 'SUCCESS'")"
-# 8 ingestion + 8 bronze + 14 silver/gold/mart + 8 clickhouse
-assert_eq "dagster has one asset per table" "38" \
+# 9 ingestion + 9 bronze + 18 silver/gold/mart + 9 clickhouse
+assert_eq "dagster has one asset per table" "45" \
   "$(psql_dagster "SELECT count(*) FROM asset_keys")"
-# 8 ingestion + 8 bronze + 1 gold + 8 clickhouse
-assert_eq "dagster checks passed" "25" \
+# 8 ingestion + 8 bronze + 1 gold + 9 clickhouse; refunds may be empty, so have no has_rows
+assert_eq "dagster checks passed" "26" \
   "$(psql_dagster "SELECT count(*) FROM asset_check_executions WHERE execution_status = 'SUCCEEDED'")"
 
 echo "--- a new source row must reach the marts"
@@ -109,6 +109,45 @@ compose start rustfs
 compose --profile tools run --rm etl python serve.py >/dev/null
 check_marts "lake back" 7 1756.5
 
+echo "--- a customer change opens a new version; old sales keep the old one"
+old_key="$(clickhouse "SELECT customer_key FROM marts.dim_customer WHERE customer_id = 1 AND is_current")"
+compose exec -T postgres psql -q -U "$POSTGRES_USER" -d demo \
+  -c "UPDATE pos.customers SET country_code = 'MY' WHERE customer_id = 1"
+compose --profile tools run --rm etl python etl.py
+assert_eq "customer 1 has two versions" "2" \
+  "$(clickhouse "SELECT count() FROM marts.dim_customer WHERE customer_id = 1")"
+assert_eq "exactly one is current" "1" \
+  "$(clickhouse "SELECT count() FROM marts.dim_customer WHERE customer_id = 1 AND is_current")"
+assert_eq "the current version has the new country" "Malaysia" \
+  "$(clickhouse "SELECT country FROM marts.dim_customer WHERE customer_id = 1 AND is_current")"
+assert_eq "no sale moved to the new version" "0" \
+  "$(clickhouse "SELECT count() FROM marts.fact_sales WHERE customer_key != $old_key
+                 AND customer_key IN (SELECT customer_key FROM marts.dim_customer WHERE customer_id = 1)")"
+check_marts "customer change" 7 1756.5
+compose --profile tools run --rm etl python etl.py
+assert_eq "re-running adds no version" "2" \
+  "$(clickhouse "SELECT count() FROM marts.dim_customer WHERE customer_id = 1")"
+
+echo "--- a refund lowers net revenue and leaves gross alone"
+compose exec -T postgres psql -q -U "$POSTGRES_USER" -d demo <<'SQL'
+INSERT INTO pos.refunds (item_id, refund_date, quantity, amount, reason)
+SELECT item_id, DATE '2026-09-02', 1, 60.00, 'damaged' FROM pos.transaction_items
+WHERE transaction_id = 9001;
+INSERT INTO pos.refunds (item_id, refund_date, quantity, amount, reason)
+SELECT item_id, DATE '2026-09-03', 1, 500.00, 'more than the item sold for' FROM pos.transaction_items
+WHERE transaction_id = 9001;
+SQL
+compose --profile tools run --rm etl python etl.py
+check_marts "after refunds" 7 1756.5
+assert_eq "the valid refund is served" "60" \
+  "$(clickhouse "SELECT round(sum(amount), 2) FROM marts.fact_refunds")"
+assert_eq "daily net revenue" "1696.5" \
+  "$(clickhouse "SELECT round(sum(net_revenue), 2) FROM marts.daily_sales_mart")"
+assert_eq "customer net spend" "1696.5" \
+  "$(clickhouse "SELECT round(sum(net_spent), 2) FROM marts.customer_sales_mart")"
+assert_eq "dim_date is a full calendar" "365" \
+  "$(clickhouse "SELECT count() FROM marts.dim_date")"
+
 echo "--- an emptied source table must not keep serving its deleted rows"
 compose exec -T postgres psql -q -U "$POSTGRES_USER" -d demo -c "DELETE FROM pos.country_ref"
 compose --profile tools run --rm etl python etl.py
@@ -116,7 +155,7 @@ passed="$(compose --profile tools run --rm etl python checks.py ingestion 2>/dev
   | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["passed"])')"
 assert_eq "check ingestion reports the empty table" "False" "$passed"
 assert_eq "customers lose their country, not their sales" "Unknown" \
-  "$(clickhouse "SELECT DISTINCT country FROM marts.dim_customer")"
+  "$(clickhouse "SELECT DISTINCT country FROM marts.dim_customer WHERE is_current")"
 check_marts "emptied table" 7 1756.5
 
 echo "--- memory limits"

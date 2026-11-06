@@ -9,6 +9,7 @@
     "database.dbname": "demo",
     "topic.prefix": "demo",
     "plugin.name": "pgoutput",
+    "tombstones.on.delete": "false",
     "slot.name": "debezium_demo",
     "table.include.list": "pos.*",
     "schema.history.internal.kafka.topic": "schema-changes.demo",

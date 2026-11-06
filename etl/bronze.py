@@ -1,11 +1,13 @@
 """Bronze layer: Sling's parquet landing -> Delta bronze with metadata.
 
 Reads s3://lake/ingestion/{table}.parquet, adds an `_ingested_at` timestamp and writes
-Delta to s3://lake/bronze/{table}.
+Delta to s3://lake/bronze/{table}. In INGESTION_MODE=cdc, it merges new Debezium events
+instead (see cdc.py).
 """
 import ibis
 
-from config import S3, TABLES
+import cdc
+from config import INGESTION_MODE, S3, TABLES
 from conn import get_conn, read_parquet, write_delta
 
 
@@ -24,6 +26,8 @@ SOURCE_SCHEMAS = {
                      "payment_method": "string"},
     "transaction_items": {"item_id": "int32", "transaction_id": "int32", "product_id": "int32",
                           "quantity": "int32", "unit_price": "decimal(10, 2)"},
+    "refunds": {"refund_id": "int32", "item_id": "int32", "refund_date": "date",
+                "quantity": "int32", "amount": "decimal(10, 2)", "reason": "string"},
     "category_ref": {"category_code": "string", "category_name": "string"},
     "status_ref": {"status_code": "string", "status_name": "string"},
     "country_ref": {"country_code": "string", "country_name": "string"},
@@ -31,6 +35,9 @@ SOURCE_SCHEMAS = {
 
 
 def build_table(con, table):
+    if INGESTION_MODE == "cdc":
+        cdc.apply_events(con, table, SOURCE_SCHEMAS[table])
+        return
     path = f"s3://{S3['lake_bucket']}/ingestion/{table}.parquet"
     src = read_parquet(con, path, f"ingestion_{table}").cast(SOURCE_SCHEMAS[table])
     # One batch-level load timestamp: ibis.now() is transaction-constant,
