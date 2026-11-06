@@ -13,3 +13,4 @@ ingestion/sling/.sling/
 ingestion/sling/executions/
 .pytest_cache/
 backups/
+.deployed-version

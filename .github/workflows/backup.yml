@@ -1,0 +1,35 @@
+name: Backup
+
+# Nightly backup of the deployed stack, on the self-hosted runner. Scheduled workflows
+# always run from main, so a pull request cannot change this. If the machine is off at
+# that time the run waits in the queue, then fails after a day, so missed backups show up
+# in the Actions tab. See "Deploying" in README.md.
+on:
+  schedule:
+    - cron: "0 19 * * *" # 02:00 in Jakarta
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, pondhouse-deploy]
+    environment: production
+    timeout-minutes: 60
+    steps:
+      - name: Back up
+        env:
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          cd "$DEPLOY_DIR"
+          PONDHOUSE_VERSION="$(cat .deployed-version)"
+          export PONDHOUSE_VERSION
+          export COMPOSE_PROJECT_NAME=pondhouse
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.deploy.yml
+          bash scripts/backup.sh

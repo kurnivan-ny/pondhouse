@@ -141,7 +141,8 @@ bash scripts/backup.sh                                 # keeps the newest 7
 BACKUP_DIR=/mnt/d/pondhouse-backups BACKUP_KEEP=14 bash scripts/backup.sh
 ```
 
-Nothing runs it for you, so schedule it, for example with cron:
+Once deployed, the `Backup` workflow runs this nightly (see [Deploying](#deploying)).
+Otherwise, schedule it yourself, for example with cron:
 
 ```cron
 0 2 * * * cd $HOME/pondhouse && bash scripts/backup.sh >> $HOME/pondhouse-backup.log 2>&1
@@ -165,6 +166,79 @@ docker compose --profile tools run --rm etl python serve.py   # reload the marts
 Restoring drops any Debezium replication slot, and CDC creates a new one when it restarts.
 Restore has been tested with the core databases, not with OpenMetadata's.
 
+## Deploying
+
+Once CI passes on `main`, the `Deploy` workflow publishes images to GHCR on GitHub's
+runners, then a self-hosted runner on your machine deploys them with `scripts/deploy.sh`.
+That script takes a backup, starts the new version, and goes back to the previous one if
+it doesn't become healthy. Rollback restores images and config, not data: if a release
+changed a database schema, use `scripts/restore.sh` with the backup it took. A separate
+`Backup` workflow runs nightly.
+
+Publishing starts as soon as this is on `main`. Deploying and backups stay off until you
+finish the steps below.
+
+### Setting it up (once)
+
+**1. Protect the runner first.** This repo is public and the runner executes code on your
+machine, with Docker access that amounts to root. A pull request from a fork can edit a
+workflow to run on your runner, so GitHub's approval step is what stops it:
+
+- Settings → Actions → General → *Approval for running fork pull request workflows*: choose
+  **Require approval for all external contributors**.
+- **Never approve a run from someone else's PR that changes `.github/workflows/`** or the
+  scripts it runs, unless you've read the changes.
+- Settings → Environments → New environment `production` → Deployment branches and tags:
+  **Selected branches and tags**, add `main`.
+
+**2. Make a clone just for deployment**, separate from the one you develop in:
+
+```bash
+git clone https://github.com/kurnivan-ny/pondhouse.git ~/pondhouse-prod
+cd ~/pondhouse-prod
+cp .env.example .env    # then change every password, and set ALERT_WEBHOOK_URL
+```
+
+Its stack is the compose project `pondhouse`, the same name `docker compose` gives a clone
+called `pondhouse`. So don't run `docker compose up` in your development clone while it's
+deployed: it would replace these containers. Use `COMPOSE_PROJECT_NAME=pondhouse-dev` there,
+and stop that stack first, since the published ports clash. The smoke tests are safe.
+
+**3. Install the runner.** At Settings → Actions → Runners → New self-hosted runner → Linux,
+GitHub shows download commands and a short-lived token. Keep the token to yourself. When
+configuring, add the label the workflows look for:
+
+```bash
+./config.sh --url https://github.com/kurnivan-ny/pondhouse --token <TOKEN> \
+  --name wsl-laptop --labels pondhouse-deploy --unattended
+sudo ./svc.sh install && sudo ./svc.sh start   # needs systemd enabled in WSL; or ./run.sh
+```
+
+Its user must be able to run `docker` and read the deployment clone. Your machine has to be
+on for a deploy to happen: jobs wait in the queue for up to a day.
+
+**4. Turn it on.** At Settings → Secrets and variables → Actions → Variables, add:
+
+| Variable | Value |
+|---|---|
+| `DEPLOY_DIR` | full path of the clone, e.g. `/home/you/pondhouse-prod` |
+| `DEPLOY_ENABLED` | `true` |
+
+**5. Run it once**: Actions → Deploy → Run workflow, on `main`. Then, if the source database
+is new, seed it from the deployment clone:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.deploy.yml
+export PONDHOUSE_VERSION="$(cat .deployed-version)"
+docker compose exec -T postgres psql -U pondhouse -d demo -v ON_ERROR_STOP=1 < etl/sql/00_init.sql
+docker compose --profile tools run --rm etl python etl.py
+```
+
+Dagster's schedule starts switched off, so turn on `pondhouse_pipeline`'s schedule in its UI.
+
+To pause deploys, set `DEPLOY_ENABLED` to anything else. To go back to a version by hand, run
+`git checkout --detach <commit> && bash scripts/deploy.sh <commit>` in the deployment clone.
+
 ## Failure alerts
 
 Set `ALERT_WEBHOOK_URL` in `.env` to a Slack or Discord incoming webhook, then recreate
@@ -177,7 +251,7 @@ Without a URL, alerts only go to the `dagster-daemon` log. Delivery depends on
 
 Every core and `cdc` service has a `mem_limit` in `docker-compose.yml`, set above its
 measured peak on the demo data. Java services also have a capped heap. A service that
-exceeds its limit is killed, so raise the limit as your data grows; the three smoke tests
+exceeds its limit is killed, so raise the limit as your data grows; the smoke tests
 fail if any container was killed this way. The `monitoring` and `governance` profiles have
 no limits yet, because they haven't been measured.
 
@@ -249,6 +323,7 @@ docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
 # end-to-end checks; isolated projects, safe next to a live stack
 bash scripts/smoke_test.sh   # the pipeline, with exact revenue
 bash scripts/smoke_ops.sh    # Metabase migration, backup and restore, alerts
+bash scripts/smoke_deploy.sh # deploy, upgrade, rollback
 ```
 
 Or run it as a **Dagster** asset graph (ingestion → bronze → transform → serve,

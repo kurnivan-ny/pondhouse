@@ -1,0 +1,15 @@
+# Overlay for scripts/deploy.sh: run the images published by the deploy workflow instead
+# of building locally. PONDHOUSE_VERSION is the git commit they were built from.
+services:
+  dagster-webserver:
+    build: !reset null
+    image: ${PONDHOUSE_IMAGE_PREFIX:-ghcr.io/kurnivan-ny/pondhouse}-dagster:${PONDHOUSE_VERSION:?set by scripts/deploy.sh}
+  dagster-daemon:
+    build: !reset null
+    image: ${PONDHOUSE_IMAGE_PREFIX:-ghcr.io/kurnivan-ny/pondhouse}-dagster:${PONDHOUSE_VERSION:?set by scripts/deploy.sh}
+  etl:
+    build: !reset null
+    image: ${PONDHOUSE_IMAGE_PREFIX:-ghcr.io/kurnivan-ny/pondhouse}-etl:${PONDHOUSE_VERSION:?set by scripts/deploy.sh}
+  connect:
+    build: !reset null
+    image: ${PONDHOUSE_IMAGE_PREFIX:-ghcr.io/kurnivan-ny/pondhouse}-connect:${PONDHOUSE_VERSION:?set by scripts/deploy.sh}

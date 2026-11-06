@@ -32,6 +32,7 @@ docker compose --profile tools run --rm --build -e REQUIRE_CLICKHOUSE=1 \
 bash scripts/smoke_test.sh           # pipeline, re-run, checks, Dagster, new row, lake outage
 bash scripts/smoke_cdc.sh            # row in Postgres -> readable parquet on RustFS
 bash scripts/smoke_ops.sh            # Metabase H2 migration, backup + restore, alerts
+bash scripts/smoke_deploy.sh         # deploy.sh: first deploy, upgrade, rollback
 ```
 
 The seed data must give exactly **6 fact rows and 1656.50 revenue** at every stage of
@@ -39,7 +40,7 @@ The seed data must give exactly **6 fact rows and 1656.50 revenue** at every sta
 of total RAM: run alone on a 7.4 GB WSL laptop, `smoke_test.sh` kept about 4.2 GB available.
 Other stacks running alongside can use that up, so check `free -m` first; `smoke_ops.sh` is
 the heaviest, because Metabase takes about 1.4 GB.
-CI (`.github/workflows/ci.yml`) runs lint, tests, all three smoke tests, image builds and scans.
+CI (`.github/workflows/ci.yml`) runs lint, tests, all four smoke tests, image builds and scans.
 
 ## Gotchas already learned
 
@@ -85,6 +86,12 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, all three smoke tests, image b
   only for ingestion and opens no ports. Recheck on upgrades.
 - Gitleaks scans commits, not the working tree, so a local run before committing misses new
   files. Run it after committing and before pushing.
+- The self-hosted runner has Docker on the owner's machine, and the repo is public. Deploy and
+  backup workflows use `workflow_run`/`schedule`, which always run main's file, but a fork PR
+  could still edit `ci.yml` to target the runner. Only the fork approval setting stops that.
+- The deployed stack's project name is `pondhouse`, which is also the default for a clone
+  with that directory name. Running compose in such a clone would replace deployed containers.
+- `deploy.sh` rollback restores images and config, not data; schema changes need `restore.sh`.
 - Metabase v0.65's image bundles the ClickHouse driver (seen in its startup log), so it needs
   no plugin. Connecting it to the marts through the UI has not been tried.
 - Metabase's `MB_DB_FILE=/metabase-data/metabase.db` creates a folder, so the H2 path is
@@ -115,21 +122,17 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, all three smoke tests, image b
 | 2. Security + config | Secrets out of the repo, localhost ports, non-root, Dagster on Postgres, real checks, working CDC, Kafka in `cdc` profile, SQLMesh removed | Done, merged with stage 3 in PR #4 |
 | 3. Upgrades | `uv` + lockfile, Dagster 1.13, Ibis 12, DuckDB 2.0, deltalake 1.6, pyarrow 26, ClickHouse 26.3, pinned images, Dependabot | Done, PR #4 merged |
 | 4. Architecture | Native ClickHouse marts swapped in with `EXCHANGE TABLES`, one Dagster asset per table calling Python directly, Sling installed in the image as the only ingestion path | Done, PR #11 merged |
-| 5. Operations | Backups (`pg_dump` + lake bucket), Dagster failure alerts, Metabase on Postgres, memory limits | Branch `feat/stage-5-operations`, tested locally, **PR not opened yet** |
-| 6. Deploy to WSL | Publish images to GHCR, self-hosted runner deploys on merge to `main` | Not started |
+| 5. Operations | Backups (`pg_dump` + lake bucket), Dagster failure alerts, Metabase on Postgres, memory limits | Done, PRs #12 and #13 merged |
+| 6. Deploy to WSL | Publish images to GHCR, self-hosted runner deploys on merge to `main` | Branch `feat/stage-6-deploy`, `deploy.sh` tested locally; workflows and the runner have **never run** |
 | 7. Data model | Surrogate keys, SCD Type 2 customers, full-calendar `dim_date`, refunds, incremental loads, CDC into bronze | Not started, largest stage; owner may skip it |
 
 ## Next steps
 
-1. Open the stage 5 PR, confirm CI passes, and merge it.
-2. Nothing schedules `scripts/backup.sh` yet, and backups stay on the same disk by default.
-   Stage 6 is a natural place to fix both.
-3. Continue with stages 6 and 7.
-
-Stage 6 needs the owner to install the
-runner with a token from GitHub settings. The repo is public, so the runner must only
-serve `main` and manual runs, never pull requests, and outside contributors' workflows
-must require approval.
+1. Open the stage 6 PR, confirm CI passes, and merge it. That first publishes images to GHCR.
+2. The owner sets up the runner: see "Deploying" in `README.md`. A token comes from GitHub
+   settings, and the fork approval setting must be on first. The first real deploy is the
+   first test of the workflows, the GHCR pull and the runner.
+3. Stage 7 is the largest, and the owner may skip it.
 
 ## Upgrading an existing install
 

@@ -229,6 +229,12 @@ services:
       context: .
       dockerfile: orchestration/Dockerfile
     command: dagster-webserver -h 0.0.0.0 -p 3001 -w workspace.yaml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/server_info', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 2m
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3001:3001"
     env_file: .env
