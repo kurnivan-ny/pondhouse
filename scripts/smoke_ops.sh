@@ -29,7 +29,8 @@ env_value() { sed -n "s/^$1=//p" .env | head -1; }
 POSTGRES_USER="$(env_value POSTGRES_USER)"
 CLICKHOUSE_PASSWORD="$(env_value CLICKHOUSE_PASSWORD)"
 EMAIL=smoke@example.com
-PASSWORD=Sm0ke-Test-Zebra-9
+# For a throwaway Metabase admin. The prefix meets Metabase's password rules.
+PASSWORD="Smoke-1-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
 
 clickhouse() {
   docker compose exec -T clickhouse clickhouse-client --password "$CLICKHOUSE_PASSWORD" -q "$1"

@@ -2,3 +2,7 @@
 # secret. To be moved to .env along with the other hard-coded credentials; once
 # that is done it still stays in history, so keep this entry.
 3f3ceea5af544395488f01551fa5b0689cd99ba9:docker-compose.yml:generic-api-key:272
+
+# Throwaway password for a test-only Metabase admin in smoke_ops.sh, deleted when the test
+# ended. The script now generates one per run, but this commit stays in history.
+a9fad32ab2f1c0e17e166aa58d1cd934ed16b6bb:scripts/smoke_ops.sh:generic-api-key:32
