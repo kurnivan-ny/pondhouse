@@ -1,0 +1,3 @@
+# Always LF, even when a Windows git touches this WSL checkout.
+* text=auto eol=lf
+*.svg text eol=lf

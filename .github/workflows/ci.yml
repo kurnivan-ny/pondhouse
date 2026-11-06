@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 15
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:25.3
+        image: clickhouse/clickhouse-server:26.3
         env:
           CLICKHOUSE_USER: default
           CLICKHOUSE_PASSWORD: pondhouse
@@ -71,11 +71,11 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: etl/requirements*.txt
 
       - name: Install dependencies
-        run: pip install -r etl/requirements-dev.txt
+        run: |
+          pip install uv==0.13.7
+          uv sync --frozen
 
       - name: Pytest (ClickHouse parity tests must run, not skip)
         working-directory: etl
@@ -85,7 +85,7 @@ jobs:
           CLICKHOUSE_PORT: "8123"
           CLICKHOUSE_USER: default
           CLICKHOUSE_PASSWORD: pondhouse
-        run: python -m pytest tests/ -q
+        run: uv run --frozen python -m pytest tests/ -q
 
   smoke:
     runs-on: ubuntu-latest
@@ -113,7 +113,7 @@ jobs:
       matrix:
         include:
           - name: etl
-            context: etl
+            context: .
             file: etl/Dockerfile
           - name: dagster
             context: .
@@ -148,9 +148,6 @@ jobs:
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.1 \
             image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --no-progress pondhouse-${{ matrix.name }}:ci
 
-  # Report only for the same reason as Trivy: pip-audit reports known advisories
-  # in the pinned dependencies today, so it warns instead of failing. Make it
-  # exit non-zero after the upgrades.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -163,10 +160,6 @@ jobs:
 
       - name: pip-audit
         run: |
-          pip install pip-audit==2.10.1
-          status=0
-          pip-audit -r etl/requirements.txt || status=1
-          pip-audit -r orchestration/requirements.txt || status=1
-          if [ "$status" -ne 0 ]; then
-            echo "::warning title=pip-audit::Known vulnerabilities in pinned dependencies (report only, see this job's log)"
-          fi
+          pip install uv==0.13.7 pip-audit==2.10.1
+          uv export --frozen --no-dev --all-extras --format requirements-txt -o requirements.lock
+          pip-audit --require-hashes --disable-pip -r requirements.lock

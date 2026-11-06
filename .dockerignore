@@ -5,4 +5,3 @@
 **/*.pyc
 **/*.duckdb
 **/.pytest_cache
-etl/tests

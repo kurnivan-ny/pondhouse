@@ -4,18 +4,19 @@ FROM python:3.12-slim
 
 ENV DAGSTER_HOME=/opt/dagster/dagster_home \
     PONDHOUSE_ETL_DIR=/opt/dagster/etl \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/usr/local
 
 WORKDIR /opt/dagster
 
-COPY orchestration/requirements.txt .
-# Dagster pulls a large dependency tree; the default 15s socket timeout is not
-# enough on slower links.
-RUN pip install --no-cache-dir --timeout 120 --retries 10 -r requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv==0.13.7 \
+    && uv sync --frozen --no-dev --no-install-project --no-cache --extra orchestration
 
 # The ETL modules are top-level scripts, run by path with /opt/dagster/etl as the
 # working directory.
-COPY etl ./etl
+COPY etl/*.py ./etl/
+COPY etl/sql ./etl/sql
 # serve.py reads ../serving/delta_marts.sql relative to itself, i.e.
 # /opt/dagster/serving/delta_marts.sql.
 COPY serving ./serving

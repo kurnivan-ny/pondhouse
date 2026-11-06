@@ -27,16 +27,16 @@ their own profiles.
 
 | Layer | Tool | Version | Profile | Port | URL |
 |---|---|---|---|---|---|
-| Storage | RustFS (S3) | latest | core | 9000 API / 9001 console | http://localhost:9001 |
+| Storage | RustFS (S3) | 1.0.4 | core | 9000 API / 9001 console | http://localhost:9001 |
 | Streaming | Kafka (KRaft) | 4.0.0 | `cdc` | 29092 host / 9092 internal | — |
 | CDC | Kafka Connect + Debezium + Aiven S3 sink | 3.0 / 3.2.0 | `cdc` | 8083 | REST API |
-| Serving | ClickHouse | 25.3 | core | 8123 HTTP / 9009 native | http://localhost:8123/play |
-| Viz | Metabase | latest | core | 3000 | http://localhost:3000 |
-| Orchestration | Dagster | latest | core | 3001 | http://localhost:3001 |
+| Serving | ClickHouse | 26.3 | core | 8123 HTTP / 9009 native | http://localhost:8123/play |
+| Viz | Metabase | v0.65.2 | core | 3000 | http://localhost:3000 |
+| Orchestration | Dagster | 1.13 | core | 3001 | http://localhost:3001 |
 | Shared DB + demo source | Postgres (wal_level=logical) | 16 | core | 5433 → 5432 (`POSTGRES_HOST_PORT`) | — |
-| Batch CLI | Sling | latest | `tools` | — | `docker compose exec sling ...` |
-| Medallion ETL | Ibis + DuckDB + deltalake | — | `tools` | — | `docker compose run --rm etl ...` |
-| Monitoring | Beszel (hub + agent) | latest | `monitoring` | 8090 | http://localhost:8090 |
+| Batch CLI | Sling | 1.6.5 | `tools` | — | `docker compose exec sling ...` |
+| Medallion ETL | Ibis + DuckDB + deltalake | see `uv.lock` | `tools` | — | `docker compose run --rm etl ...` |
+| Monitoring | Beszel (hub + agent) | 0.21.1 | `monitoring` | 8090 | http://localhost:8090 |
 | Governance | OpenMetadata + Elasticsearch | 1.13.3 / 9.3.0 | `governance` | 8585 / 8080 | http://localhost:8585 |
 
 ## Quickstart
@@ -67,6 +67,7 @@ pondhouse/
 ├── docker-compose.yml      # the whole platform (core + 4 profiles)
 ├── .env                    # all credentials / config knobs (gitignored)
 ├── .env.example            # copy to .env; documents every setting
+├── pyproject.toml, uv.lock # all Python dependencies, one locked set
 ├── docs/                   # architecture / star-schema / services diagrams (SVG)
 ├── ingestion/sling/        # batch ingestion: connections + replication YAMLs
 ├── etl/                    # demo medallion ETL: Sling (oltp->bronze) + Ibis (silver/gold/mart)
@@ -251,6 +252,19 @@ docker compose --profile governance up -d
 reach the server from the host. Connect DBeaver via HTTP: host `localhost`, port
 `8123`, database `marts`, user `default`, password from `.env`
 (`CLICKHOUSE_PASSWORD`). Native TCP also available on port `9009`.
+
+## Dependencies
+
+All Python dependencies are in `pyproject.toml`, with exact versions in `uv.lock`, so
+every image and CI job gets the same set. To change one:
+
+```bash
+docker run --rm -v "$PWD:/w" -w /w -u "$(id -u):$(id -g)" -e UV_CACHE_DIR=/tmp/uv \
+  python:3.12-slim sh -c "pip install -q --target /tmp/u uv==0.13.7 && PYTHONPATH=/tmp/u python -m uv lock --upgrade-package duckdb"
+```
+
+Dependabot proposes weekly updates for Python, images and GitHub Actions; CI, including
+the end-to-end smoke tests and a blocking vulnerability scan, decides if they are safe.
 
 ## Overlapping components (by design)
 

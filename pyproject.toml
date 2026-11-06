@@ -1,0 +1,32 @@
+[project]
+name = "pondhouse"
+version = "0.1.0"
+description = "A lean, fully open-source lakehouse platform"
+requires-python = "==3.12.*"
+# The pipeline itself. Exact versions live in uv.lock.
+dependencies = [
+    "apscheduler>=3.11",
+    "deltalake>=1.6",
+    "duckdb>=2.0",
+    "ibis-framework[duckdb]>=12.0",
+    "psycopg2-binary>=2.9",
+    "pyarrow>=26.0",
+]
+
+[project.optional-dependencies]
+orchestration = [
+    "dagster>=1.13",
+    "dagster-postgres>=0.29",
+    "dagster-webserver>=1.13",
+]
+
+[dependency-groups]
+dev = [
+    # ClickHouse backend for the cross-engine parity tests.
+    "ibis-framework[clickhouse]>=12.0",
+    "pytest>=9.0",
+]
+
+[tool.uv]
+# An application, not a library: scripts run from etl/, nothing is installed.
+package = false

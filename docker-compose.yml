@@ -22,7 +22,7 @@ services:
   # ---------------- Storage: RustFS (S3) ----------------
   rustfs:
     restart: unless-stopped
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.4
     environment:
       # rustfs admin credentials (minio-compatible)
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
@@ -117,7 +117,7 @@ services:
   # ---------------- ClickHouse (serving layer) ----------------
   clickhouse:
     restart: unless-stopped
-    image: clickhouse/clickhouse-server:25.3
+    image: clickhouse/clickhouse-server:26.3
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
@@ -172,7 +172,7 @@ services:
   # ---------------- Metabase ----------------
   metabase:
     restart: unless-stopped
-    image: metabase/metabase:latest
+    image: metabase/metabase:v0.65.2
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
@@ -225,7 +225,8 @@ services:
   #   docker compose run --rm etl python etl.py --ingest custom --no-serve
   etl:
     build:
-      context: ./etl
+      context: .
+      dockerfile: etl/Dockerfile
       target: dev
     image: pondhouse-etl:latest
     profiles: ["tools"]
@@ -249,7 +250,7 @@ services:
   # ---------------- Sling CLI (profile: tools) ----------------
   # usage: docker compose --profile tools exec sling sling run ...
   sling:
-    image: slingdata/sling:latest
+    image: slingdata/sling:1.6.5
     profiles: ["tools"]
     user: "${SLING_USER:-1000:1000}"    # match host uid:gid so /sling mount is writable (sling downloads duckdb to /sling/bin)
     env_file: .env
@@ -262,7 +263,7 @@ services:
 
   # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
   beszel:
-    image: henrygd/beszel:latest
+    image: henrygd/beszel:0.21.1
     profiles: ["monitoring"]
     restart: unless-stopped
     ports:
@@ -273,7 +274,7 @@ services:
       - "host.docker.internal:host-gateway"   # lets the hub reach the agent
 
   beszel-agent:
-    image: henrygd/beszel-agent:latest
+    image: henrygd/beszel-agent:0.21.1
     profiles: ["monitoring"]
     restart: unless-stopped
     network_mode: host   # accurate host CPU/RAM/net/disk stats
