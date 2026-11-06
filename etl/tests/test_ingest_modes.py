@@ -96,7 +96,7 @@ def test_merge_leaves_no_orphaned_parquet_files(monkeypatch, delta_path):
     ingest._merge_table(_FakeCon(_rows([1, 2], ["a", "b"])), None, delta_path, "stores")
     ingest._merge_table(_FakeCon(_rows([2, 3], ["B", "c"])), None, delta_path, "stores")
 
-    active = {f.split("/")[-1] for f in deltalake.DeltaTable(delta_path).files()}
+    active = {f.split("/")[-1] for f in deltalake.DeltaTable(delta_path).file_uris()}
     on_disk = set(_parquet_files(delta_path))
     assert on_disk == active, f"orphaned files left behind: {on_disk - active}"
 
@@ -112,7 +112,7 @@ def test_vacuum_delta_removes_previous_versions(tmp_path):
                                   mode="overwrite", schema_mode="overwrite")
         conn.vacuum_delta(path, {})
 
-    active = {f.split("/")[-1] for f in deltalake.DeltaTable(path).files()}
+    active = {f.split("/")[-1] for f in deltalake.DeltaTable(path).file_uris()}
     assert set(_parquet_files(path)) == active
 
 

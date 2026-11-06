@@ -250,7 +250,7 @@ services:
   # ---------------- Sling CLI (profile: tools) ----------------
   # usage: docker compose --profile tools exec sling sling run ...
   sling:
-    image: slingdata/sling:1.6.5
+    image: slingdata/sling:v1.6.5
     profiles: ["tools"]
     user: "${SLING_USER:-1000:1000}"    # match host uid:gid so /sling mount is writable (sling downloads duckdb to /sling/bin)
     env_file: .env

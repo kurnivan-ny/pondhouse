@@ -34,7 +34,8 @@ bash scripts/smoke_cdc.sh            # row in Postgres -> readable parquet on Ru
 ```
 
 The seed data must give exactly **6 fact rows and 1656.50 revenue** at every stage of
-`smoke_test.sh`. Smoke tests are the heaviest step: allow about 8 GB of free RAM.
+`smoke_test.sh`. Smoke tests are the heaviest step, but they fit in 8 GB of total RAM: on
+a 7.4 GB WSL laptop, available memory never fell below about 4.3 GB, with under 25 MB of swap.
 CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds and scans.
 
 ## Gotchas already learned
@@ -45,12 +46,20 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
   real `docker pull`. Pulls also failed at times from IPv6 "network is unreachable";
   retry before concluding an image is gone.
 - `minio/mc` can no longer be pulled, so buckets are created with `rustfs/rc`.
+- `slingdata/sling` version tags need a `v` prefix: `v1.6.5` exists, `1.6.5` does not.
 - SQLAlchemy 2.1 changes the default Postgres driver to psycopg v3, which broke the
-  NOTIFY statements in dagster-postgres 0.23. Stage 2 pins `<2.1`. Stage 3 drops the
-  pin, so confirm dagster-postgres 0.29 works with the locked 2.1.8.
+  NOTIFY statements in dagster-postgres 0.23. With dagster-postgres 0.29 and 2.1.8, Dagster
+  fails on startup with `No module named 'psycopg'`, so `pyproject.toml` pins `<2.1`.
+- sqlglot 30.18 and later read `Drop`'s table from `tables`, but Ibis 12.0.0 passes `this`,
+  so Ibis renders `DROP VIEW IF EXISTS` with no name and `create_table` with in-memory data
+  fails. `pyproject.toml` pins `sqlglot<30.18`. The pipeline doesn't call `create_table`, so
+  smoke tests pass without the pin and only the unit tests catch this. Drop the pin once
+  a newer Ibis handles it.
 - `dagster.yaml` must live in `$DAGSTER_HOME`; otherwise Dagster silently uses SQLite.
-- ClickHouse's named collection needs `named_collection_control` for the user
-  (`serving/users.d/named_collections.xml`), which must match `CLICKHOUSE_USER`.
+- ClickHouse's named collection needs `named_collection_control` for the user, and 26.3
+  also needs `show_named_collections_secrets`, which lets that user read the S3 credentials
+  in the collection (`serving/users.d/named_collections.xml`). The user must match
+  `CLICKHOUSE_USER`.
 - ClickHouse rejects a Delta table whose files have different schemas, so `etl/bronze.py`
   casts to one schema (`SOURCE_SCHEMAS`) whichever ingestion path ran.
 - Aiven sink: `file.name.prefix` is ignored when a template is set, so `cdc/` is in
@@ -59,9 +68,10 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
 - Unverified: whether Metabase needs a separate ClickHouse driver plugin.
 - Not run yet: the `governance` (OpenMetadata) and `monitoring` (Beszel) profiles. Only
   their compose config has been validated.
-- A `deltalake` warning appears on many writes ("Attempting to write a transaction N
-  but the underlying table has been updated to N"). Data was correct. Recheck it after
-  the upgrade; `AWS_S3_ALLOW_UNSAFE_RENAME` in `etl/config.py` is worth reviewing.
+- Before the upgrade, a `deltalake` warning appeared on many writes ("Attempting to write
+  a transaction N but the underlying table has been updated to N"). It did not appear in
+  the upgraded smoke tests. `AWS_S3_ALLOW_UNSAFE_RENAME` in `etl/config.py` is still worth
+  reviewing.
 
 ## Roadmap
 
@@ -70,7 +80,7 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
 | CI foundation | Lint, tests, builds | Done, PR #2 merged |
 | 1. Revenue bugs | Silver fixes, smoke test, `rustfs/rc` | Done, PR #3 merged |
 | 2. Security + config | Secrets out of the repo, localhost ports, non-root, Dagster on Postgres, real checks, working CDC, Kafka in `cdc` profile, SQLMesh removed | Pushed to `fix/security-and-config`, tested locally, **PR not opened yet** |
-| 3. Upgrades | `uv` + lockfile, Dagster 1.13, Ibis 12, DuckDB 2.0, deltalake 1.6, pyarrow 26, ClickHouse 26.3, pinned images, Dependabot | **In progress**, branch `chore/upgrade-and-lockfile`, **untested** |
+| 3. Upgrades | `uv` + lockfile, Dagster 1.13, Ibis 12, DuckDB 2.0, deltalake 1.6, pyarrow 26, ClickHouse 26.3, pinned images, Dependabot | **In progress**, branch `chore/upgrade-and-lockfile`. Unit and both smoke tests pass locally; CI not run yet, **PR not opened yet** |
 | 4. Architecture | Native ClickHouse marts swapped in with `EXCHANGE TABLES`, one Dagster asset per table calling Python directly, Sling installed in the image as the only ingestion path | Not started |
 | 5. Operations | Backups (`pg_dump` + lake bucket), Dagster failure alerts, Metabase on Postgres, memory limits | Not started |
 | 6. Deploy to WSL | Publish images to GHCR, self-hosted runner deploys on merge to `main` | Not started |
@@ -79,22 +89,16 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
 ## Next steps
 
 1. Open the stage 2 PR, confirm CI passes, and merge it.
-2. On `chore/upgrade-and-lockfile`, merge `main`, then build and test. The upgrade has
-   never been built: the first attempt was stopped when the old laptop ran out of memory.
-3. Fix what the major upgrades break. Likely places:
-   - deltalake 1.x API: `DeltaTable.files()` in `etl/tests/test_ingest_modes.py`, plus
-     `write_deltalake`, `merge` and `vacuum` in `etl/conn.py` and `etl/ingest.py`.
-   - Ibis 12 + DuckDB 2.0: `etl/transform.py`, `raw_sql` usage in `etl/conn.py`, and the
-     delta and postgres DuckDB extensions, which must exist for DuckDB 2.0.
-   - Dagster 1.13: the `dagster.core.*` module paths in `orchestration/dagster.yaml`.
-   - ClickHouse 26.3: the `DeltaLake` engine and named collection. Check whether vacuuming
-     with 0 retention (`etl/conn.py`) is still needed.
-   - Tags not confirmed to pull: `slingdata/sling:1.6.5`, `henrygd/beszel:0.21.1`,
-     `henrygd/beszel-agent:0.21.1`.
-   - The `uv lock --upgrade-package` command in the README has not been run.
-4. `pip-audit` is now blocking in CI. Confirm the upgrades clear the known advisories.
-   Trivy stays report-only until its first results have been reviewed.
-5. Continue with stages 4 to 7.
+2. Open the stage 3 PR from `chore/upgrade-and-lockfile` and confirm CI passes on a clean
+   machine. Locally, all 71 unit tests, both smoke tests, `ruff` and `pip-audit` pass.
+   Hadolint, Gitleaks and Trivy have not been run locally.
+3. Finish the stage 3 checks:
+   - ClickHouse 26.3: check whether vacuuming with 0 retention (`etl/conn.py`) is still
+     needed.
+   - The README's `uv lock` container command works, but `--upgrade-package` has not been
+     run.
+   - Trivy stays report-only until its first results have been reviewed.
+4. Continue with stages 4 to 7.
 
 Stage 5's Metabase move needs a one-time migration of existing dashboards from the H2
 file: document it and don't delete the old data. Stage 6 needs the owner to install the
