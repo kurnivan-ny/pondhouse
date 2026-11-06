@@ -248,6 +248,7 @@ services:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      INGESTION_MODE: ${INGESTION_MODE:-snapshot}
     volumes:
       - dagster-storage:/opt/dagster/dagster_home/storage
     depends_on:
@@ -289,6 +290,7 @@ services:
       S3_ENDPOINT: http://rustfs:9000
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
+      INGESTION_MODE: ${INGESTION_MODE:-snapshot}
     depends_on:
       postgres:
         condition: service_healthy

@@ -30,6 +30,7 @@ MARTS = {
     "dim_store": ("gold", "store_key"),
     "dim_date": ("gold", "date_key"),
     "fact_sales": ("gold", "(date_key, item_key)"),
+    "fact_refunds": ("gold", "(date_key, refund_key)"),
     "daily_sales_mart": ("mart", "(date_key, store_name)"),
     "product_sales_mart": ("mart", "(category, product_name)"),
     "customer_sales_mart": ("mart", "customer_key"),

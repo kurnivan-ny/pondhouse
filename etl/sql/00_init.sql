@@ -62,6 +62,16 @@ CREATE TABLE IF NOT EXISTS pos.transaction_items (
   unit_price     NUMERIC(10,2) NOT NULL
 );
 
+-- A refund of all or part of a sold item. The seed has none, so seeded revenue is exact.
+CREATE TABLE IF NOT EXISTS pos.refunds (
+  refund_id   SERIAL PRIMARY KEY,
+  item_id     INT NOT NULL REFERENCES pos.transaction_items(item_id),
+  refund_date DATE NOT NULL,
+  quantity    INT NOT NULL CHECK (quantity > 0),
+  amount      NUMERIC(10,2) NOT NULL,
+  reason      TEXT
+);
+
 -- ---------------- Reference data ----------------
 INSERT INTO pos.category_ref (category_code, category_name)
 SELECT * FROM (VALUES

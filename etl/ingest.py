@@ -4,11 +4,15 @@ Sling is installed in the etl and Dagster images (see pyproject.toml). Its conne
 and replication live in SLING_HOME, which the images point at their copy of
 ingestion/sling.
 
+In INGESTION_MODE=cdc this does nothing: bronze reads Debezium's events instead.
+
 Usage:
   python ingest.py
 """
 import os
 import subprocess
+
+from config import INGESTION_MODE
 
 SLING_HOME = os.getenv(
     "SLING_HOME",
@@ -19,6 +23,9 @@ REPLICATION = os.path.join(SLING_HOME, "replications", "demo-to-lake.yaml")
 
 def run_sling():
     """Run the full-refresh replication, raising with Sling's output if it fails."""
+    if INGESTION_MODE == "cdc":
+        print("INGESTION_MODE=cdc: skipping Sling")
+        return
     result = subprocess.run(
         ["sling", "run", "--home-dir", SLING_HOME, "-r", REPLICATION],
         capture_output=True, text=True, check=False,

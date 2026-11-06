@@ -85,6 +85,68 @@ print(rows)
       exit 1
     fi
     echo "ok: DuckDB reads $rows CDC rows from parquet"
+    echo "--- incremental: merging events into bronze, and through to the marts"
+    run_etl() { compose --profile tools run --rm -T -e INGESTION_MODE=cdc etl "$@"; }
+    clickhouse() {
+      compose exec -T clickhouse clickhouse-client \
+        --password "$(env_value CLICKHOUSE_PASSWORD)" -q "$1"
+    }
+    wait_for_events() { # table, condition on the landing files; flushes take up to a minute
+      for _ in $(seq 1 40); do
+        seen="$(run_etl python -c "
+from conn import get_conn
+print(get_conn().raw_sql(\"\"\"SELECT count(*) FROM read_parquet('s3://cdc-landing/cdc/demo.pos.$1/*/*.parquet') WHERE $2\"\"\").fetchone()[0])
+" | tail -1 || true)"
+        if [ "${seen:-0}" -ge 1 ] 2>/dev/null; then return 0; fi
+        sleep 6
+      done
+      echo "FAIL: no landing event for $1 matching: $2" >&2
+      connect_api GET /connectors/rustfs-cdc-landing/status >&2 || true
+      return 1
+    }
+    # Everything the seed loaded has to land before bronze can match it.
+    wait_for_events transaction_items "value.op = 'r' AND value.source.snapshot = 'last_in_data_collection'"
+    wait_for_events customers "value.op = 'r' AND value.source.snapshot = 'last_in_data_collection'"
+    run_etl python etl.py >/dev/null
+    assert_rows() { # description, expected, query
+      got="$(clickhouse "$3")"
+      if [ "$got" != "$2" ]; then echo "FAIL: $1: expected '$2', got '$got'" >&2; exit 1; fi
+      echo "ok: $1 = $got"
+    }
+    assert_rows "cdc bootstrap: fact rows" "6" "SELECT count() FROM marts.fact_sales"
+    assert_rows "cdc bootstrap: revenue" "1656.5" "SELECT round(sum(line_amount), 2) FROM marts.fact_sales"
+
+    compose exec -T postgres psql -q -U "$POSTGRES_USER" -d demo <<'SQL'
+INSERT INTO pos.transactions (transaction_id, store_id, customer_id, transaction_date, status_code, payment_method)
+VALUES (9002, 1, 1, '2026-09-01', 'C', 'CARD');
+INSERT INTO pos.transaction_items (transaction_id, product_id, quantity, unit_price)
+VALUES (9002, 1, 1, 100.00);
+UPDATE pos.customers SET full_name = 'Renamed By CDC' WHERE customer_id = 1;
+DELETE FROM pos.category_ref WHERE category_code = 'CDC';
+SQL
+    wait_for_events transaction_items "value.after.transaction_id = 9002"
+    wait_for_events customers "value.op = 'u'"
+    wait_for_events category_ref "value.op = 'd'"
+    run_etl python etl.py >/dev/null
+    assert_rows "an insert is merged" "7" "SELECT count() FROM marts.fact_sales"
+    assert_rows "its revenue arrives" "1756.5" "SELECT round(sum(line_amount), 2) FROM marts.fact_sales"
+    assert_rows "an update is merged" "Renamed By CDC" \
+      "SELECT full_name FROM marts.dim_customer WHERE customer_id = 1 AND is_current"
+    deleted="$(run_etl python -c "
+from conn import get_conn
+print(get_conn().raw_sql(\"\"\"SELECT count(*) FROM delta_scan('s3://lake/bronze/category_ref') WHERE category_code = 'CDC'\"\"\").fetchone()[0])
+" 2>/dev/null | tail -1)"
+    if [ "$deleted" != "0" ]; then echo "FAIL: the deleted row is still in bronze: '$deleted'" >&2; exit 1; fi
+    echo "ok: a delete is merged"
+    run_etl python etl.py >/dev/null
+    assert_rows "a run with no new events changes nothing" "1756.5" \
+      "SELECT round(sum(line_amount), 2) FROM marts.fact_sales"
+    # A connector can say RUNNING while its task has failed. A source DELETE used to do
+    # that to the sink, which stopped all landing.
+    sink_task="$(connect_api GET /connectors/rustfs-cdc-landing/status \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["tasks"][0]["state"])')"
+    if [ "$sink_task" != "RUNNING" ]; then echo "FAIL: sink task is $sink_task" >&2; exit 1; fi
+    echo "ok: the sink task survived the delete"
     oom="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" \
       | xargs docker inspect --format '{{if .State.OOMKilled}}{{.Name}}{{end}}' | tr -d '\n')"
     if [ -n "$oom" ]; then

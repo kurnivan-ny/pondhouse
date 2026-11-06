@@ -38,6 +38,7 @@ on RustFS, computed with Ibis, and served to ClickHouse.
 |---|---|
 | `sql/00_init.sql` | `pos` schema: source tables + reference lookups + seed data |
 | `generate_data.py` | inserts new POS transactions (manual / scheduler) |
+| `cdc.py` | incremental bronze: merges Debezium events when `INGESTION_MODE=cdc` |
 | `ingest.py` | ingestion: runs the Sling replication in `ingestion/sling` |
 | `bronze.py` | ingestion → **bronze** Delta (adds `_ingested_at`) |
 | `transform.py` | **silver** (translate/cleanse/dedup) → **gold** (fact+dim) → **mart** |
@@ -91,6 +92,48 @@ docker compose --profile tools run --rm etl python generate_data.py --rows 5
 > instead requires `S3_ENDPOINT=http://localhost:9000` and `POSTGRES_PORT=5433`, plus the
 > Sling CLI, with hosts in `ingestion/sling/env.yaml` changed to match.
 
+## Data model
+
+**Customers keep their history (SCD type 2).** The source only holds today's values, so each
+run compares them with `silver.customer_history` and adds a row for anything that changed.
+`dim_customer` has one row per version, with `version`, `valid_from`, `valid_to` and
+`is_current`. Each sale and refund points to the version valid at midnight on its date, so old
+sales keep the country the customer had then.
+
+- `customer_history` is the one table that **can't be rebuilt** from the source. Back it up:
+  `scripts/backup.sh` includes it.
+- A version starts when a run first sees the change, so several changes between two runs
+  count as one, and a sale dated the day of a change gets the older version.
+
+**Keys are deterministic.** `customer_key` is `customer_id * 1000000 + version`, so a rebuild
+gives the same keys. `product_key` and `store_key` are the surviving source ids, and
+`date_key` is the date. Hash keys were rejected because Ibis has no MD5 for ClickHouse, which
+would break the parity tests.
+
+**`dim_date` is a full calendar**: every day of each year with a sale or refund, with
+`quarter`, `month_name`, `day_name`, `is_weekend` and more.
+
+**Refunds** come from `pos.refunds`. A refund must have a positive amount and, with the item's
+earlier refunds, can't exceed what it sold for; others land in `silver.rejected_refunds`. Marts
+keep gross figures unchanged and add `refund_amount` with `net_revenue` (or `total_refunded`
+with `net_spent`). The daily mart counts a refund on the refund's date, so a day can have a
+negative net.
+
+## Incremental loads (CDC)
+
+By default every run re-reads each table through Sling. With `INGESTION_MODE=cdc`, Sling is
+skipped and bronze merges only new Debezium events from `s3://cdc-landing`, including deletes.
+It needs the `cdc` profile running with both connectors registered (see the main README).
+Set it in `.env`, or per run with `docker compose --profile tools run -e INGESTION_MODE=cdc ...`.
+
+- Silver and later still rebuild fully, because their joins and dedup need all the rows.
+- Events reach the landing bucket after a flush of up to about a minute.
+- Switching over replays the topic, which holds Debezium's initial snapshot.
+- Sling's own incremental mode isn't used: the source has no `updated_at`, so going by id
+  would miss a transaction changing from pending to completed.
+- Nothing alerts if a Connect task fails. Check `GET /connectors/<name>/status`, and look at
+  the task's state, because the connector can say `RUNNING` while its task has `FAILED`.
+
 ## Querying the result
 
 ClickHouse serves the gold + mart layers as `marts.*`:
@@ -141,7 +184,7 @@ docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
 ```
 
 `scripts/smoke_test.sh` runs the real pipeline end to end and asserts exact revenue
-in ClickHouse after a first run, a re-run, Dagster, a new source row, a lake outage and an emptied source table. It uses its own compose
+in ClickHouse after a first run, a re-run, Dagster, a new source row, a lake outage, a customer change, refunds and an emptied source table. It uses its own compose
 project, volumes and no published ports, so it is safe next to a live stack.
 
 ## Scheduler
@@ -169,6 +212,7 @@ All knobs are env vars with defaults matching `../.env`:
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / `pondhouse` | ClickHouse auth |
 | `ETL_SCHEDULE_CRON` | `*/5 * * * *` | scheduler cadence |
 | `ALERT_WEBHOOK_URL` | *(empty)* | Dagster failure alerts |
+| `INGESTION_MODE` | `snapshot` | `snapshot` (Sling) or `cdc` (merge Debezium events) |
 
 ## Notes on correctness
 

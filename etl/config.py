@@ -62,7 +62,15 @@ TABLES = [
     "category_ref",
     "status_ref",
     "country_ref",
+    "refunds",
 ]
+
+# Source tables that may legitimately have no rows.
+OPTIONAL_TABLES = {"refunds"}
+
+# How bronze is loaded: "snapshot" re-reads everything through Sling. "cdc" merges only
+# new Debezium events from s3://cdc-landing, and needs the `cdc` profile running.
+INGESTION_MODE = os.getenv("INGESTION_MODE", "snapshot")
 
 # 5-field cron: minute hour day month weekday
 SCHEDULE_CRON = os.getenv("ETL_SCHEDULE_CRON", "*/5 * * * *")

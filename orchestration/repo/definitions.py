@@ -26,7 +26,7 @@ import checks  # noqa: E402
 import ingest  # noqa: E402
 import serve  # noqa: E402
 import transform  # noqa: E402
-from config import TABLES  # noqa: E402
+from config import OPTIONAL_TABLES, TABLES  # noqa: E402
 from conn import get_conn  # noqa: E402
 
 
@@ -181,8 +181,8 @@ defs = dg.Definitions(
         *[_clickhouse_asset(t, layer) for t, (layer, _sort_key) in serve.MARTS.items()],
     ],
     asset_checks=[
-        *[_rows_check("ingestion", t) for t in TABLES],
-        *[_rows_check("bronze", t) for t in TABLES],
+        *[_rows_check("ingestion", t) for t in TABLES if t not in OPTIONAL_TABLES],
+        *[_rows_check("bronze", t) for t in TABLES if t not in OPTIONAL_TABLES],
         gold_fact_check,
         *[_served_check(t) for t in serve.MARTS],
     ],
