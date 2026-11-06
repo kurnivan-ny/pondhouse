@@ -31,7 +31,7 @@ their own profiles.
 | Streaming | Kafka (KRaft) | 4.0.0 | `cdc` | 29092 host / 9092 internal | — |
 | CDC | Kafka Connect + Debezium + Aiven S3 sink | 3.7.0 / 3.4.3 | `cdc` | 8083 | REST API |
 | Serving | ClickHouse | 26.3 | core | 8123 HTTP / 9009 native | http://localhost:8123/play |
-| Viz | Metabase | v0.65.2 | core | 3000 | http://localhost:3000 |
+| Viz | Metabase (on Postgres; ClickHouse driver bundled) | v0.65.2 | core | 3000 | http://localhost:3000 |
 | Orchestration | Dagster | 1.13 | core | 3001 | http://localhost:3001 |
 | Shared DB + demo source | Postgres (wal_level=logical) | 16 | core | 5433 → 5432 (`POSTGRES_HOST_PORT`) | — |
 | Batch ingestion | Sling (in the `etl` and Dagster images) | see `uv.lock` | `tools` | — | `docker compose --profile tools run --rm etl python ingest.py` |
@@ -88,6 +88,7 @@ pondhouse/
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres superuser | `pondhouse` / `pondhouse` / `pondhouse` |
 | `BIND_ADDR` | Interface all ports publish on | `127.0.0.1` |
 | `ETL_SCHEDULE_CRON` | Dagster + APScheduler cadence | `*/5 * * * *` |
+| `ALERT_WEBHOOK_URL` | Dagster failure alerts (Slack or Discord webhook) | *(empty: only logged)* |
 | `BESZEL_AGENT_KEY` | Beszel agent auth | *(paste from Beszel UI)* |
 | `OM_VERSION` | OpenMetadata + ingestion image tag | `1.13.3` |
 | `OM_FERNET_KEY` | OpenMetadata secret key; **required** for `governance` | *(generate)* |
@@ -117,6 +118,68 @@ holds a real secret.
   leaves the lake data untouched, and table and column names stay the same.
 - Dagster now has one asset per table, so old assets such as `bronze_layer` stay in its
   history but are no longer built.
+- **Metabase moved from its H2 file to Postgres.** To keep your dashboards, run this
+  before starting the new Metabase:
+
+  ```bash
+  docker compose stop metabase
+  bash scripts/migrate_metabase_h2.sh
+  ```
+
+  The H2 file stays in the `metabase-data` volume. If Metabase already started and shows
+  its setup screen, nothing is lost: run the script with `--replace-existing`, which
+  deletes the new `metabase` Postgres database first, including anything created there.
+  Keep the volume until you've checked your dashboards.
+
+## Backups
+
+`scripts/backup.sh` saves every Postgres database (including Metabase's dashboards and
+Dagster's history) and the `lake` and `cdc-landing` buckets to `backups/<timestamp>/`:
+
+```bash
+bash scripts/backup.sh                                 # keeps the newest 7
+BACKUP_DIR=/mnt/d/pondhouse-backups BACKUP_KEEP=14 bash scripts/backup.sh
+```
+
+Nothing runs it for you, so schedule it, for example with cron:
+
+```cron
+0 2 * * * cd $HOME/pondhouse && bash scripts/backup.sh >> $HOME/pondhouse-backup.log 2>&1
+```
+
+- **Copy backups off this machine.** By default they sit on the same disk as the data.
+- **Treat them as secrets.** They hold password hashes and Metabase's stored connection
+  details. `backups/` is ignored by git and readable only by you.
+- **Avoid running one during a pipeline run.** The script compares object counts and fails
+  if the lake changed during the copy; run it again if so.
+- A backup appears under its final name only after its dumps and object counts are verified.
+- ClickHouse isn't backed up, because its marts are rebuilt from the lake.
+
+To restore, which **replaces** the current databases and buckets:
+
+```bash
+bash scripts/restore.sh backups/<timestamp> --yes
+docker compose --profile tools run --rm etl python serve.py   # reload the marts
+```
+
+Restoring drops any Debezium replication slot, and CDC creates a new one when it restarts.
+Restore has been tested with the core databases, not with OpenMetadata's.
+
+## Failure alerts
+
+Set `ALERT_WEBHOOK_URL` in `.env` to a Slack or Discord incoming webhook, then recreate
+Dagster with `docker compose up -d dagster-webserver dagster-daemon`. Each run sends at
+most one message: when it fails, or when it succeeds but data-quality checks failed.
+Without a URL, alerts only go to the `dagster-daemon` log. Delivery depends on
+`dagster-daemon` running, so nothing is sent if the whole stack is down.
+
+## Memory limits
+
+Every core and `cdc` service has a `mem_limit` in `docker-compose.yml`, set above its
+measured peak on the demo data. Java services also have a capped heap. A service that
+exceeds its limit is killed, so raise the limit as your data grows; the three smoke tests
+fail if any container was killed this way. The `monitoring` and `governance` profiles have
+no limits yet, because they haven't been measured.
 
 ## CDC pipeline
 
@@ -183,8 +246,9 @@ docker compose --profile tools run --rm etl python generate_data.py --rows 5
 docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
   python -m pytest tests/ -q
 
-# end-to-end check with exact revenue; isolated project, safe next to a live stack
-bash scripts/smoke_test.sh
+# end-to-end checks; isolated projects, safe next to a live stack
+bash scripts/smoke_test.sh   # the pipeline, with exact revenue
+bash scripts/smoke_ops.sh    # Metabase migration, backup and restore, alerts
 ```
 
 Or run it as a **Dagster** asset graph (ingestion → bronze → transform → serve,

@@ -85,6 +85,13 @@ print(rows)
       exit 1
     fi
     echo "ok: DuckDB reads $rows CDC rows from parquet"
+    oom="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" \
+      | xargs docker inspect --format '{{if .State.OOMKilled}}{{.Name}}{{end}}' | tr -d '\n')"
+    if [ -n "$oom" ]; then
+      echo "FAIL: containers killed for memory: $oom" >&2
+      exit 1
+    fi
+    echo "ok: no container was killed for memory"
     echo "cdc smoke test passed"
     exit 0
   fi

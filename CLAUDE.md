@@ -31,12 +31,15 @@ docker compose --profile tools run --rm --build -e REQUIRE_CLICKHOUSE=1 \
 # so they are safe next to a live stack, and they clean up after themselves.
 bash scripts/smoke_test.sh           # pipeline, re-run, checks, Dagster, new row, lake outage
 bash scripts/smoke_cdc.sh            # row in Postgres -> readable parquet on RustFS
+bash scripts/smoke_ops.sh            # Metabase H2 migration, backup + restore, alerts
 ```
 
 The seed data must give exactly **6 fact rows and 1656.50 revenue** at every stage of
-`smoke_test.sh`. Smoke tests are the heaviest step, but they fit in 8 GB of total RAM: on
-a 7.4 GB WSL laptop, available memory never fell below about 4.2 GB, with under 250 MB of swap.
-CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds and scans.
+`smoke_test.sh`, until its later stages add a row (7 rows, 1756.50). Smoke tests fit in 8 GB
+of total RAM: run alone on a 7.4 GB WSL laptop, `smoke_test.sh` kept about 4.2 GB available.
+Other stacks running alongside can use that up, so check `free -m` first; `smoke_ops.sh` is
+the heaviest, because Metabase takes about 1.4 GB.
+CI (`.github/workflows/ci.yml`) runs lint, tests, all three smoke tests, image builds and scans.
 
 ## Gotchas already learned
 
@@ -80,7 +83,20 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
 - Trivy also ignores the Sling binary when blocking, while still reporting it: it has 42
   HIGH/CRITICAL findings in compiled-in Go libraries on the latest release. Sling runs
   only for ingestion and opens no ports. Recheck on upgrades.
-- Unverified: whether Metabase needs a separate ClickHouse driver plugin.
+- Metabase v0.65's image bundles the ClickHouse driver (seen in its startup log), so it needs
+  no plugin. Connecting it to the marts through the UI has not been tried.
+- Metabase's `MB_DB_FILE=/metabase-data/metabase.db` creates a folder, so the H2 path is
+  `/metabase-data/metabase.db/metabase.db`. The image's entrypoint also drops the argument
+  of `load-from-h2`, so `scripts/migrate_metabase_h2.sh` runs `java` directly as uid 2000.
+- Sling keeps a table's old parquet when the source table becomes empty, unless
+  `SLING_ALLOW_EMPTY` is set (it is, in the replication file). With no matching source
+  tables at all, it exits 0 having done nothing.
+- Dagster run sensors only watch their own code location unless told otherwise, and a run
+  from `dagster asset materialize -m` counts as a different one. Hence
+  `monitor_all_code_locations=True`.
+- Dependabot raises the pins' upper limits for `sqlalchemy` and `sqlglot`, which brings the
+  breakage back. `.github/dependabot.yml` ignores those versions; remove the rule with the pin.
+- JVM services need a heap cap below `mem_limit`. Connect used 2.1 GB by default.
 - Not run yet: the `governance` (OpenMetadata) and `monitoring` (Beszel) profiles. Only
   their compose config has been validated.
 - Before the upgrade, a `deltalake` warning appeared on many writes ("Attempting to write
@@ -96,18 +112,19 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
 | 1. Revenue bugs | Silver fixes, smoke test, `rustfs/rc` | Done, PR #3 merged |
 | 2. Security + config | Secrets out of the repo, localhost ports, non-root, Dagster on Postgres, real checks, working CDC, Kafka in `cdc` profile, SQLMesh removed | Done, merged with stage 3 in PR #4 |
 | 3. Upgrades | `uv` + lockfile, Dagster 1.13, Ibis 12, DuckDB 2.0, deltalake 1.6, pyarrow 26, ClickHouse 26.3, pinned images, Dependabot | Done, PR #4 merged |
-| 4. Architecture | Native ClickHouse marts swapped in with `EXCHANGE TABLES`, one Dagster asset per table calling Python directly, Sling installed in the image as the only ingestion path | Branch `refactor/stage-4-architecture`, tested locally, **PR not opened yet** |
-| 5. Operations | Backups (`pg_dump` + lake bucket), Dagster failure alerts, Metabase on Postgres, memory limits | Not started |
+| 4. Architecture | Native ClickHouse marts swapped in with `EXCHANGE TABLES`, one Dagster asset per table calling Python directly, Sling installed in the image as the only ingestion path | Done, PR #11 merged |
+| 5. Operations | Backups (`pg_dump` + lake bucket), Dagster failure alerts, Metabase on Postgres, memory limits | Branch `feat/stage-5-operations`, tested locally, **PR not opened yet** |
 | 6. Deploy to WSL | Publish images to GHCR, self-hosted runner deploys on merge to `main` | Not started |
 | 7. Data model | Surrogate keys, SCD Type 2 customers, full-calendar `dim_date`, refunds, incremental loads, CDC into bronze | Not started, largest stage; owner may skip it |
 
 ## Next steps
 
-1. Open the stage 4 PR, confirm CI passes, and merge it.
-2. Continue with stages 5 to 7.
+1. Open the stage 5 PR, confirm CI passes, and merge it.
+2. Nothing schedules `scripts/backup.sh` yet, and backups stay on the same disk by default.
+   Stage 6 is a natural place to fix both.
+3. Continue with stages 6 and 7.
 
-Stage 5's Metabase move needs a one-time migration of existing dashboards from the H2
-file: document it and don't delete the old data. Stage 6 needs the owner to install the
+Stage 6 needs the owner to install the
 runner with a token from GitHub settings. The repo is public, so the runner must only
 serve `main` and manual runs, never pull requests, and outside contributors' workflows
 must require approval.
@@ -115,4 +132,5 @@ must require approval.
 ## Upgrading an existing install
 
 See "Upgrading an existing install" in `README.md` when moving a running stack onto the
-stage 2 and 4 changes: new `.env` settings, and old containers must be stopped first.
+stage 2, 4 and 5 changes: new `.env` settings, old containers must be stopped first, and
+Metabase's dashboards need a one-time migration from H2.

@@ -20,6 +20,7 @@ PONDHOUSE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 ETL_DIR = os.getenv("PONDHOUSE_ETL_DIR", os.path.join(PONDHOUSE_DIR, "etl"))
 sys.path.insert(0, ETL_DIR)
 
+import alerts  # noqa: E402
 import bronze  # noqa: E402
 import checks  # noqa: E402
 import ingest  # noqa: E402
@@ -116,6 +117,49 @@ def gold_fact_check() -> dg.AssetCheckResult:
     return _check_result(lambda: checks.run("gold"))
 
 
+# --- Failure alerts ---
+# These run in dagster-daemon and are on by default. Each run sends at most one message,
+# since one outage fails many checks. Nothing is sent until ALERT_WEBHOOK_URL is set.
+def _failed_checks(instance, run_id):
+    events = instance.all_logs(run_id, of_type=dg.DagsterEventType.ASSET_CHECK_EVALUATION)
+    evaluations = [event.dagster_event.event_specific_data for event in events]
+    return sorted(
+        f"{'/'.join(e.asset_key.path)} {e.check_name}" for e in evaluations if not e.passed
+    )
+
+
+def _failed_checks_text(failed):
+    shown = ", ".join(failed[:10])
+    more = f" and {len(failed) - 10} more" if len(failed) > 10 else ""
+    return f"{len(failed)} failed checks: {shown}{more}"
+
+
+@dg.run_failure_sensor(default_status=dg.DefaultSensorStatus.RUNNING,
+                       monitor_all_code_locations=True)
+def alert_on_run_failure(context: dg.RunFailureSensorContext):
+    run = context.dagster_run
+    failed = _failed_checks(context.instance, run.run_id)
+    checks_text = f" {_failed_checks_text(failed)}." if failed else ""
+    alerts.send_alert(
+        f"pondhouse: run {run.run_id} of {run.job_name} failed: "
+        f"{context.failure_event.message}{checks_text}"
+    )
+
+
+# A failed check does not fail the run, so the sensor above would miss it.
+@dg.run_status_sensor(run_status=dg.DagsterRunStatus.SUCCESS,
+                      default_status=dg.DefaultSensorStatus.RUNNING,
+                      monitor_all_code_locations=True)
+def alert_on_failed_checks(context: dg.RunStatusSensorContext):
+    run = context.dagster_run
+    failed = _failed_checks(context.instance, run.run_id)
+    if failed:
+        alerts.send_alert(
+            f"pondhouse: run {run.run_id} of {run.job_name} succeeded "
+            f"with {_failed_checks_text(failed)}"
+        )
+
+
 # --- Job and schedule ---
 pondhouse_pipeline_job = dg.define_asset_job(
     name="pondhouse_pipeline",
@@ -144,6 +188,7 @@ defs = dg.Definitions(
     ],
     jobs=[pondhouse_pipeline_job],
     schedules=[pondhouse_schedule],
+    sensors=[alert_on_run_failure, alert_on_failed_checks],
     # One process for the whole run. A subprocess per step would start Python and
     # import Ibis about 60 times, which costs far more time and memory than this
     # small pipeline saves by running in parallel.
