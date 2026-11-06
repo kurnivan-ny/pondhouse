@@ -13,7 +13,7 @@ dependencies = [
     "pyarrow>=26.0",
     "sling>=1.6",
     # sqlglot 30.18 reads Drop's table from `tables`, but Ibis 12.0 passes `this`, so
-    # every Ibis DROP renders with no name (see CLAUDE.md).
+    # every Ibis DROP renders with no name (see "Known issues" in README.md).
     "sqlglot<30.18",
 ]
 
@@ -23,7 +23,7 @@ orchestration = [
     "dagster-postgres>=0.29",
     "dagster-webserver>=1.13",
     # SQLAlchemy 2.1 makes psycopg v3 the default Postgres driver, but dagster-postgres
-    # needs psycopg2 (see CLAUDE.md).
+    # needs psycopg2 (see "Known issues" in README.md).
     "sqlalchemy>=2.0,<2.1",
 ]
 
