@@ -35,7 +35,7 @@ services:
       - rustfs-data:/data
 
   createbuckets:
-    image: rustfs/rc:v0.1.36
+    image: rustfs/rc:v0.1.37
     depends_on:
       - rustfs
     env_file: .env
