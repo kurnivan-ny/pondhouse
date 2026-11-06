@@ -1,6 +1,0 @@
-# Core dependencies with pinned versions for reproducibility
-psycopg2-binary==2.9.9
-apscheduler==3.10.4
-ibis-framework[duckdb]==9.2.0
-duckdb==1.1.3
-deltalake==0.25.1

@@ -7,16 +7,18 @@ Orchestrates the lakehouse pipeline:
   - Asset checks for data quality
 """
 
-import dagster as dg
+import json
 import os
 import shutil
 import subprocess
 import sys
 
+import dagster as dg
+
 PONDHOUSE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # The ETL modules are top-level scripts in etl/ (not an importable `etl` package —
-# etl.py itself shadows that name), so they run as `-m <module>` from ETL_DIR.
+# etl.py itself shadows that name), so they run by path from ETL_DIR.
 # In the Dagster image the code is copied to /opt/dagster/etl, which is not two
 # levels up from repo/; PONDHOUSE_ETL_DIR lets the image state where it lives.
 def _resolve_etl_dir():
@@ -39,7 +41,7 @@ def _run_etl_module(script, *args, method=None):
     """Run one of the etl/ scripts and surface its output on failure."""
     result = subprocess.run(
         [sys.executable, script, *args],
-        cwd=ETL_DIR, capture_output=True, text=True,
+        cwd=ETL_DIR, capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -73,7 +75,7 @@ def sling_ingestion() -> dict:
              "sling", "run", "--home-dir", "/sling",
              "-r", "/sling/replications/demo-to-lake.yaml"],
         ):
-            result = subprocess.run(argv, cwd=PONDHOUSE_DIR,
+            result = subprocess.run(argv, cwd=PONDHOUSE_DIR, check=False,
                                     capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(f"Sling step failed: {result.stderr}")
@@ -121,42 +123,49 @@ def clickhouse_marts() -> dict:
 
 
 # --- Asset Checks ---
-@dg.asset_check(asset=sling_ingestion, description="Verify ingestion produced parquet files")
+def _run_check(layer):
+    """Run etl/checks.py for a layer. A check that cannot run counts as failed."""
+    result = subprocess.run(
+        [sys.executable, "checks.py", layer],
+        cwd=ETL_DIR, capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return dg.AssetCheckResult(
+            passed=False,
+            metadata={"error": (result.stderr or result.stdout)[-2000:]},
+        )
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    return dg.AssetCheckResult(
+        passed=outcome["passed"],
+        metadata={k: dg.MetadataValue.json(v) if isinstance(v, (dict, list)) else v
+                  for k, v in outcome["metadata"].items()},
+    )
+
+
+@dg.asset_check(asset=sling_ingestion, description="Every source table landed with rows")
 def sling_ingestion_check() -> dg.AssetCheckResult:
-    """Check that Sling produced expected parquet files in RustFS."""
-    # This would use MinIO client or S3 API to verify files exist
-    # For now, return passed with metadata note
-    return dg.AssetCheckResult(
-        passed=True,
-        metadata={"note": "Implement S3 verification via minio client"}
-    )
+    return _run_check("ingestion")
 
 
-@dg.asset_check(asset=bronze_layer, description="Verify bronze tables have rows")
+@dg.asset_check(asset=bronze_layer, description="Every bronze table has rows")
 def bronze_layer_check() -> dg.AssetCheckResult:
-    """Check bronze Delta tables have expected row counts."""
-    return dg.AssetCheckResult(
-        passed=True,
-        metadata={"note": "Implement DuckDB row count check"}
-    )
+    return _run_check("bronze")
 
 
-@dg.asset_check(asset=transform_layer, description="Verify gold fact table has rows")
+@dg.asset_check(
+    asset=transform_layer,
+    description="fact_sales is unique, resolves against dims, and reconciles with silver",
+)
 def gold_fact_check() -> dg.AssetCheckResult:
-    """Check gold fact_sales table has data."""
-    return dg.AssetCheckResult(
-        passed=True,
-        metadata={"note": "Implement DuckDB row count check on gold.fact_sales"}
-    )
+    return _run_check("gold")
 
 
-@dg.asset_check(asset=clickhouse_marts, description="Verify ClickHouse marts tables exist")
+@dg.asset_check(
+    asset=clickhouse_marts,
+    description="ClickHouse serves the same row counts as the Delta tables",
+)
 def clickhouse_marts_check() -> dg.AssetCheckResult:
-    """Check ClickHouse marts tables were created."""
-    return dg.AssetCheckResult(
-        passed=True,
-        metadata={"note": "Implement ClickHouse table existence check"}
-    )
+    return _run_check("marts")
 
 
 # --- Full Pipeline Job ---
@@ -173,7 +182,7 @@ pondhouse_pipeline_job = dg.define_asset_job(
 # --- Schedule ---
 pondhouse_schedule = dg.ScheduleDefinition(
     job=pondhouse_pipeline_job,
-    cron_schedule="*/5 * * * *",  # Every 5 minutes (matches ETL_SCHEDULE_CRON)
+    cron_schedule=os.getenv("ETL_SCHEDULE_CRON", "*/5 * * * *"),
     execution_timezone="UTC",
 )
 

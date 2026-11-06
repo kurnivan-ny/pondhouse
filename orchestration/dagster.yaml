@@ -1,37 +1,34 @@
-# Dagster instance config
-# NOTE: Dagster YAML does not support ${ENV_VAR} substitution.
-# Either:
-#   1. Keep this file in sync with .env manually, OR
-#   2. Use a generated config: scripts/generate-dagster-config.py (not yet implemented)
-#   3. Override via DAGSTER_HOME/dagster.yaml at runtime
-#
-# Default credentials match pondhouse/.env (POSTGRES_USER=pondhouse, POSTGRES_PASSWORD=pondhouse)
-run_storage:
-  module: dagster_postgres.run_storage
-  class: PostgresRunStorage
-  config:
-    postgres_url: "postgresql://{{ env_var('POSTGRES_USER', 'pondhouse') }}:{{ env_var('POSTGRES_PASSWORD', 'pondhouse') }}@postgres:5432/dagster"
+# Dagster instance config. Copied into $DAGSTER_HOME by orchestration/Dockerfile.
+storage:
+  postgres:
+    postgres_db:
+      hostname: postgres
+      port: 5432
+      db_name: dagster
+      username:
+        env: POSTGRES_USER
+      password:
+        env: POSTGRES_PASSWORD
 
-event_log_storage:
-  module: dagster_postgres.event_log
-  class: PostgresEventLogStorage
+# One pipeline run at a time: a slow run must not overlap the next schedule tick,
+# since every run rewrites the same Delta tables.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
   config:
-    postgres_url: "postgresql://{{ env_var('POSTGRES_USER', 'pondhouse') }}:{{ env_var('POSTGRES_PASSWORD', 'pondhouse') }}@postgres:5432/dagster"
-
-schedule_storage:
-  module: dagster_postgres.schedule_storage
-  class: PostgresScheduleStorage
-  config:
-    postgres_url: "postgresql://{{ env_var('POSTGRES_USER', 'pondhouse') }}:{{ env_var('POSTGRES_PASSWORD', 'pondhouse') }}@postgres:5432/dagster"
+    max_concurrent_runs: 1
 
 compute_logs:
   module: dagster.core.storage.local_compute_log_manager
   class: LocalComputeLogManager
   config:
-    base_dir: /opt/dagster/dagster_home/compute_logs
+    base_dir: /opt/dagster/dagster_home/storage/compute_logs
 
 local_artifact_storage:
   module: dagster.core.storage.root
   class: LocalArtifactStorage
   config:
-    base_dir: /opt/dagster/dagster_home/artifacts
+    base_dir: /opt/dagster/dagster_home/storage/artifacts
+
+telemetry:
+  enabled: false

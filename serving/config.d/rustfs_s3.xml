@@ -1,13 +1,11 @@
 <clickhouse>
-    <!-- Named collection: RustFS (S3-compatible) lake storage.
-         Credentials should match .env (S3_ACCESS_KEY, S3_SECRET_KEY).
-         Note: ClickHouse XML config does not support ${ENV_VAR} substitution.
-         For production, generate this file at runtime or use a secure secret store. -->
+    <!-- Named collection: RustFS (S3-compatible) lake storage. Credentials come
+         from the container environment, set from .env in docker-compose.yml. -->
     <named_collections>
         <rustfs>
             <url>http://rustfs:9000/lake/</url>
-            <access_key_id>pondhouse</access_key_id>
-            <secret_access_key>pondhouse-secret-change-me</secret_access_key>
+            <access_key_id from_env="S3_ACCESS_KEY"/>
+            <secret_access_key from_env="S3_SECRET_KEY"/>
         </rustfs>
     </named_collections>
 </clickhouse>

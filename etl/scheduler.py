@@ -63,7 +63,7 @@ def main():
         cron_kwargs = _cron_kwargs(SCHEDULE_CRON)
     except ValueError as e:
         logging.error("Invalid cron configuration: %s", e)
-        return
+        raise SystemExit(1) from e
 
     scheduler = BlockingScheduler()
     scheduler.add_job(cycle, "cron", **cron_kwargs)

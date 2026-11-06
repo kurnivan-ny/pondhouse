@@ -1,4 +1,4 @@
-# Overlay for scripts/smoke_test.sh: no published ports, so the smoke test can run
+# Overlay for scripts/smoke_*.sh: no published ports, so the smoke tests can run
 # next to a live stack on the same machine.
 services:
   rustfs:
@@ -6,4 +6,10 @@ services:
   clickhouse:
     ports: !reset []
   postgres:
+    ports: !reset []
+  dagster-webserver:
+    ports: !reset []
+  kafka:
+    ports: !reset []
+  connect:
     ports: !reset []
