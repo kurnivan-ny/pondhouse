@@ -42,13 +42,14 @@ on RustFS, computed with Ibis, and served to ClickHouse.
 | `bronze.py` | ingestion → **bronze** Delta (adds `_ingested_at`) |
 | `transform.py` | **silver** (translate/cleanse/dedup) → **gold** (fact+dim) → **mart** |
 | `serve.py` | loads native ClickHouse `marts` tables from the Delta gold + mart layers |
+| `alerts.py` | sends failure alerts to `ALERT_WEBHOOK_URL`, used by Dagster |
 | `checks.py` | data-quality checks, run by Dagster or by hand: `python checks.py gold` |
 | `etl.py` | orchestrator: `ingest → bronze → transform → serve` (`--init` seeds) |
 | `scheduler.py` | APScheduler cron: each cycle generates data + runs the ETL |
 | `conn.py` | Ibis/DuckDB connection helper (S3 Delta) |
 | `config.py` | Postgres + RustFS + cron config (env-overridable) |
 | `Dockerfile` | `runtime` (pipeline only) and `dev` (adds tests, used by `docker compose run --rm etl ...`) targets |
-| `tests/` | pytest suite (transforms, serving, checks, db helpers, backend parity) |
+| `tests/` | pytest suite (transforms, serving, checks, alerts, db helpers, backend parity) |
 
 ## Run it (Docker)
 
@@ -140,7 +141,7 @@ docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
 ```
 
 `scripts/smoke_test.sh` runs the real pipeline end to end and asserts exact revenue
-in ClickHouse after a first run, a re-run, Dagster, a new source row and a lake outage. It uses its own compose
+in ClickHouse after a first run, a re-run, Dagster, a new source row, a lake outage and an emptied source table. It uses its own compose
 project, volumes and no published ports, so it is safe next to a live stack.
 
 ## Scheduler
@@ -167,6 +168,7 @@ All knobs are env vars with defaults matching `../.env`:
 | `CLICKHOUSE_HOST` / `CLICKHOUSE_PORT` | `localhost` / `8123` | serve step |
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / `pondhouse` | ClickHouse auth |
 | `ETL_SCHEDULE_CRON` | `*/5 * * * *` | scheduler cadence |
+| `ALERT_WEBHOOK_URL` | *(empty)* | Dagster failure alerts |
 
 ## Notes on correctness
 
@@ -184,6 +186,9 @@ All knobs are env vars with defaults matching `../.env`:
 - **Asset checks are real.** Each layer has row counts; gold also checks uniqueness,
   foreign keys and revenue against silver; serving compares ClickHouse row counts
   with Delta. A failed check is reported in Dagster but does not stop the run.
+- **An emptied source table lands as empty.** `SLING_ALLOW_EMPTY` makes Sling replace its
+  parquet; otherwise the deleted rows would keep being served. The `has_rows` check then
+  fails and sends an alert.
 - **Only ingestion touches Postgres.** Bronze/silver/gold/mart read only the lake, so
   they still work when the source database is down.
 - **Serving is atomic.** `serve.py` builds each table as `marts.{table}__new`, then swaps

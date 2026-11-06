@@ -7,6 +7,12 @@ updates:
     groups:
       python:
         patterns: ["*"]
+    # Pinned on purpose; see "Gotchas" in CLAUDE.md. Remove when the upstream issue is fixed.
+    ignore:
+      - dependency-name: sqlalchemy
+        versions: [">=2.1"]
+      - dependency-name: sqlglot
+        versions: [">=30.18"]
   - package-ecosystem: docker-compose
     directory: /
     schedule:

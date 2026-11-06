@@ -109,4 +109,19 @@ compose start rustfs
 compose --profile tools run --rm etl python serve.py >/dev/null
 check_marts "lake back" 7 1756.5
 
+echo "--- an emptied source table must not keep serving its deleted rows"
+compose exec -T postgres psql -q -U "$POSTGRES_USER" -d demo -c "DELETE FROM pos.country_ref"
+compose --profile tools run --rm etl python etl.py
+passed="$(compose --profile tools run --rm etl python checks.py ingestion 2>/dev/null \
+  | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["passed"])')"
+assert_eq "check ingestion reports the empty table" "False" "$passed"
+assert_eq "customers lose their country, not their sales" "Unknown" \
+  "$(clickhouse "SELECT DISTINCT country FROM marts.dim_customer")"
+check_marts "emptied table" 7 1756.5
+
+echo "--- memory limits"
+oom="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" \
+  | xargs docker inspect --format '{{if .State.OOMKilled}}{{.Name}}{{end}}' | tr -d '\n')"
+assert_eq "containers killed for memory" "" "$oom"
+
 echo "smoke test passed"

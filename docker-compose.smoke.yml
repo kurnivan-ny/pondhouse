@@ -7,6 +7,8 @@ services:
     ports: !reset []
   postgres:
     ports: !reset []
+  metabase:
+    ports: !reset []
   dagster-webserver:
     ports: !reset []
   kafka:

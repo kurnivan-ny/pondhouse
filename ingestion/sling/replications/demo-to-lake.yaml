@@ -9,3 +9,8 @@ defaults:
 
 streams:
   pos.*:
+
+env:
+  # Otherwise a source table that becomes empty keeps its old parquet, and the pipeline
+  # goes on serving the deleted rows. An empty file fails the has_rows check instead.
+  SLING_ALLOW_EMPTY: true
