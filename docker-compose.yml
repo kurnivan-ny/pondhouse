@@ -54,7 +54,7 @@ services:
   # ---------------- Kafka (KRaft mode, no ZooKeeper; profile: cdc) ----------------
   kafka:
     mem_limit: 1g
-    image: apache/kafka:4.0.0
+    image: apache/kafka:4.3.1
     profiles: ["cdc"]
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
