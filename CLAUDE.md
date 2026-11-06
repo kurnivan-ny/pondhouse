@@ -62,9 +62,15 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
   `CLICKHOUSE_USER`.
 - ClickHouse rejects a Delta table whose files have different schemas, so `etl/bronze.py`
   casts to one schema (`SOURCE_SCHEMAS`) whichever ingestion path ran.
+- ClickHouse 26.3 follows the Delta log: with vacuuming off, tombstoned files (including an
+  older schema) did not change results in an overwrite-mode test. `vacuum_delta` stays
+  only to stop files piling up, so a longer retention is now an option.
 - Aiven sink: `file.name.prefix` is ignored when a template is set, so `cdc/` is in
   `file.name.template`. The legacy `aws.s3.prefix` setting overrides the template.
 - GitHub runners use a different uid than 1000, hence `SLING_USER` in `smoke_test.sh`.
+- Trivy blocks CI for `etl` and `dagster` (0 findings) but only reports for `connect`,
+  which has 76 HIGH/CRITICAL findings, 47 of them inside the Aiven sink, even on the latest
+  Debezium and Aiven releases. Connect listens on localhost only. Recheck on upgrades.
 - Unverified: whether Metabase needs a separate ClickHouse driver plugin.
 - Not run yet: the `governance` (OpenMetadata) and `monitoring` (Beszel) profiles. Only
   their compose config has been validated.
@@ -90,15 +96,9 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, both smoke tests, image builds
 
 1. Open the stage 2 PR, confirm CI passes, and merge it.
 2. Open the stage 3 PR from `chore/upgrade-and-lockfile` and confirm CI passes on a clean
-   machine. Locally, all 71 unit tests, both smoke tests, `ruff` and `pip-audit` pass.
-   Hadolint, Gitleaks and Trivy have not been run locally.
-3. Finish the stage 3 checks:
-   - ClickHouse 26.3: check whether vacuuming with 0 retention (`etl/conn.py`) is still
-     needed.
-   - The README's `uv lock` container command works, but `--upgrade-package` has not been
-     run.
-   - Trivy stays report-only until its first results have been reviewed.
-4. Continue with stages 4 to 7.
+   machine. Locally, all 71 unit tests, both smoke tests, `ruff`, `pip-audit`, Hadolint and
+   Gitleaks pass.
+3. Continue with stages 4 to 7, once stages 2 and 3 are merged.
 
 Stage 5's Metabase move needs a one-time migration of existing dashboards from the H2
 file: document it and don't delete the old data. Stage 6 needs the owner to install the

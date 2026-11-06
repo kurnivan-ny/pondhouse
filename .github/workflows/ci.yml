@@ -141,12 +141,13 @@ jobs:
         if: matrix.name == 'dagster'
         run: docker run --rm --network none pondhouse-dagster:ci python -c "import repo.definitions"
 
-      # Report only: known findings exist today. Make this blocking (--exit-code 1)
-      # once the dependency upgrades land.
-      - name: Trivy scan (report only)
+      # Blocking for etl and dagster, which have no findings. Report only for connect:
+      # its findings are libraries bundled in the latest Debezium and Aiven releases.
+      - name: Trivy scan
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.1 \
-            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --no-progress pondhouse-${{ matrix.name }}:ci
+            image --severity HIGH,CRITICAL --ignore-unfixed --no-progress \
+            --exit-code ${{ matrix.name == 'connect' && '0' || '1' }} pondhouse-${{ matrix.name }}:ci
 
   audit:
     runs-on: ubuntu-latest

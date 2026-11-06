@@ -82,10 +82,9 @@ def vacuum_delta(path, storage_options):
     """Drop data files that the current Delta version no longer references.
 
     An overwrite/merge only tombstones the previous files in the transaction
-    log; they stay in the bucket. ClickHouse's DeltaLake engine reads the
-    parquet files it finds rather than replaying the log, so leftovers from an
-    earlier run with a different schema make it fail with
-    "Reading from files with different schema is not possible".
+    log; they stay in the bucket. On a frequent schedule they would pile up, so
+    this removes them. ClickHouse 26.3 follows the log and reads correctly without
+    this, unlike older versions, which failed on leftover files.
 
     retention_hours=0 needs the safety check disabled; this is a rebuild-in-place
     pipeline with a single writer and no readers of older versions.
@@ -103,7 +102,7 @@ def write_delta(con, expr, layer, table, vacuum=True):
     """Execute an Ibis expression and write the result as a Delta table.
 
     Vacuums afterwards so the directory matches the transaction log (see
-    vacuum_delta for why that matters to the ClickHouse serving layer).
+    vacuum_delta).
     """
     import deltalake
     from config import s3_storage_options

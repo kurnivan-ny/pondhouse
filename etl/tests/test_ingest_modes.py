@@ -91,7 +91,7 @@ def _parquet_files(path):
 
 
 def test_merge_leaves_no_orphaned_parquet_files(monkeypatch, delta_path):
-    """Stale files break ClickHouse's DeltaLake engine, which ignores the log."""
+    """A merge must not leave old files behind to pile up in the bucket."""
     monkeypatch.setattr(ingest, "s3_storage_options", dict)
     ingest._merge_table(_FakeCon(_rows([1, 2], ["a", "b"])), None, delta_path, "stores")
     ingest._merge_table(_FakeCon(_rows([2, 3], ["B", "c"])), None, delta_path, "stores")

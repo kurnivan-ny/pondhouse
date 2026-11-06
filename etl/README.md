@@ -196,10 +196,9 @@ All knobs are env vars with defaults matching `../.env`:
   labelled `Unknown` rather than dropped. Completed items that still can't become a
   sale land in `silver.rejected_sales`, so sales + rejected reconcile with the source.
 - **Overwrites are vacuumed.** A Delta overwrite only tombstones the previous data
-  files; they stay in the bucket. ClickHouse's `DeltaLake` engine reads the parquet
-  files it finds rather than replaying the transaction log, so stale files from an
-  earlier run with a different schema made it fail with *"Reading from files with
-  different schema is not possible"*. `write_delta` now vacuums after each write.
+  files; they stay in the bucket and would pile up on a frequent schedule, so
+  `write_delta` vacuums after each write. Older ClickHouse versions also failed on these
+  stale files; ClickHouse 26.3 follows the transaction log and reads correctly without it.
 - **`_ingested_at` is batch-level.** `ibis.now()` is transaction-constant, so every
   row of a given run shares one load timestamp — intended for a batch load stamp.
 - **Asset checks are real.** Each layer has row counts; gold also checks uniqueness,

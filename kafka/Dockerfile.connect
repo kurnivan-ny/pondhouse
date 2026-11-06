@@ -1,7 +1,7 @@
 # Kafka Connect image: Debezium source connectors + Aiven S3 sink connector
 # (Aiven sink = Apache 2.0, unlike Confluent's community-licensed sink)
 FROM alpine:3.20 AS plugins
-ARG AIVEN_S3_VERSION=3.2.0
+ARG AIVEN_S3_VERSION=3.4.3
 # If the build 404s, grab the latest version number from:
 # https://github.com/Aiven-Open/cloud-storage-connectors-for-apache-kafka/releases
 ADD https://github.com/Aiven-Open/cloud-storage-connectors-for-apache-kafka/releases/download/v${AIVEN_S3_VERSION}/s3-sink-connector-for-apache-kafka-${AIVEN_S3_VERSION}.zip /tmp/s3.zip
@@ -9,5 +9,7 @@ RUN unzip /tmp/s3.zip -d /tmp \
     && mv /tmp/s3-sink-connector-for-apache-kafka-${AIVEN_S3_VERSION} /aiven-s3-sink
 
 # Debezium publishes to quay.io; this tag is not available on Docker Hub.
-FROM quay.io/debezium/connect:3.0
+FROM quay.io/debezium/connect:3.7.0.Final
+# Only Postgres is used; the other bundled connectors just add vulnerable libraries.
+RUN find /kafka/connect -mindepth 1 -maxdepth 1 ! -name debezium-connector-postgres -exec rm -rf {} +
 COPY --from=plugins /aiven-s3-sink /kafka/connect/aiven-s3-sink
