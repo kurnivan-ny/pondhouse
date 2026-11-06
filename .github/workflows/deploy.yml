@@ -1,0 +1,107 @@
+name: Deploy
+
+# After CI passes on main: publish images to GHCR on GitHub's runners, then deploy them
+# on the self-hosted runner. `workflow_run` always uses this file as it is on main, so a
+# pull request cannot change what runs here. See "Deploying" in README.md.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never two deploys at once, and never cancel one halfway through.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  publish:
+    # head_branch alone is not enough: a fork can have a branch called main too.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: etl
+            context: .
+            file: etl/Dockerfile
+            target: runtime
+          - name: dagster
+            context: .
+            file: orchestration/Dockerfile
+            target: ""
+          - name: connect
+            context: kafka
+            file: kafka/Dockerfile.connect
+            target: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.VERSION }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/pondhouse-${{ matrix.name }}:${{ env.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/pondhouse-${{ matrix.name }}:latest
+
+  deploy:
+    needs: publish
+    # Off until the runner exists; otherwise this job would sit in the queue. See README.md.
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, pondhouse-deploy]
+    environment: production
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+    steps:
+      - name: Check out the version in the deployment clone
+        run: |
+          cd "$DEPLOY_DIR"
+          git fetch --quiet origin
+          git checkout --quiet --detach "$VERSION"
+
+      - name: Deploy
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          cd "$DEPLOY_DIR"
+          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null' EXIT
+          bash scripts/deploy.sh "$VERSION"
