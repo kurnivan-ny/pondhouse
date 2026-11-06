@@ -122,7 +122,7 @@ services:
   clickhouse:
     mem_limit: 1536m
     restart: unless-stopped
-    image: clickhouse/clickhouse-server:26.3
+    image: clickhouse/clickhouse-server:26.10
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
