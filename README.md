@@ -29,7 +29,7 @@ their own profiles.
 |---|---|---|---|---|---|
 | Storage | RustFS (S3) | 1.0.4 | core | 9000 API / 9001 console | http://localhost:9001 |
 | Streaming | Kafka (KRaft) | 4.0.0 | `cdc` | 29092 host / 9092 internal | — |
-| CDC | Kafka Connect + Debezium + Aiven S3 sink | 3.0 / 3.2.0 | `cdc` | 8083 | REST API |
+| CDC | Kafka Connect + Debezium + Aiven S3 sink | 3.7.0 / 3.4.3 | `cdc` | 8083 | REST API |
 | Serving | ClickHouse | 26.3 | core | 8123 HTTP / 9009 native | http://localhost:8123/play |
 | Viz | Metabase | v0.65.2 | core | 3000 | http://localhost:3000 |
 | Orchestration | Dagster | 1.13 | core | 3001 | http://localhost:3001 |
