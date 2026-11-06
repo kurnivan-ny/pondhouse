@@ -10,7 +10,6 @@
 # Quickstart:
 #   docker compose up -d                       # core stack
 #   docker compose --profile cdc up -d         # + Kafka + Kafka Connect (Debezium/Aiven)
-#   docker compose --profile tools up -d       # + Sling CLI container
 #   docker compose --profile monitoring up -d  # + Beszel (hub + agent)
 #   docker compose --profile governance up -d  # + OpenMetadata + Elasticsearch
 # ============================================================================
@@ -191,8 +190,8 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:3001:3001"
     env_file: .env
     environment: &etl-runtime-env
-      # The assets shell out to the etl/ scripts, which address the other
-      # services by their in-network names.
+      # The assets call the etl/ modules, which address the other services by
+      # their in-network names.
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       ETL_DB: demo
@@ -222,7 +221,7 @@ services:
   # ---------------- Medallion ETL runner ----------------
   # Runs the pipeline inside the compose network, so it addresses the other
   # services by name (postgres / rustfs / clickhouse) rather than localhost.
-  #   docker compose run --rm etl python etl.py --ingest custom --no-serve
+  #   docker compose --profile tools run --rm etl python etl.py
   etl:
     build:
       context: .
@@ -238,28 +237,11 @@ services:
       S3_ENDPOINT: http://rustfs:9000
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
-    volumes:
-      # serve.py reads ../serving/delta_marts.sql from the repo
-      - ./serving:/serving:ro
     depends_on:
       postgres:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-
-  # ---------------- Sling CLI (profile: tools) ----------------
-  # usage: docker compose --profile tools exec sling sling run ...
-  sling:
-    image: slingdata/sling:v1.6.5
-    profiles: ["tools"]
-    user: "${SLING_USER:-1000:1000}"    # match host uid:gid so /sling mount is writable (sling downloads duckdb to /sling/bin)
-    env_file: .env
-    environment:
-      HOME: /sling        # writable home so sling can fetch its duckdb runtime
-    volumes:
-      - ./ingestion/sling:/sling
-    working_dir: /sling
-    entrypoint: ["sleep", "infinity"]
 
   # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
   beszel:

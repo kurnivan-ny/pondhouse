@@ -1,140 +1,90 @@
-"""Pondhouse Dagster definitions.
+"""Pondhouse Dagster definitions: one asset per table.
 
-Orchestrates the lakehouse pipeline:
-  - Sling batch ingestion (oltp -> parquet on RustFS)
-  - Ibis/DuckDB medallion transforms (bronze -> silver -> gold -> mart)
-  - ClickHouse serving layer creation
-  - Asset checks for data quality
+  ingestion/*  Sling replication, Postgres -> parquet on RustFS (runs as one step)
+  bronze/*     Delta copy of each source table
+  silver/*, gold/*, mart/*  Ibis transforms, from the registry in etl/transform.py
+  clickhouse/* native ClickHouse tables, swapped in atomically
+
+Assets call the etl/ Python functions directly.
 """
 
-import json
 import os
-import shutil
-import subprocess
 import sys
 
 import dagster as dg
 
 PONDHOUSE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-# The ETL modules are top-level scripts in etl/ (not an importable `etl` package —
-# etl.py itself shadows that name), so they run by path from ETL_DIR.
-# In the Dagster image the code is copied to /opt/dagster/etl, which is not two
-# levels up from repo/; PONDHOUSE_ETL_DIR lets the image state where it lives.
-def _resolve_etl_dir():
-    override = os.getenv("PONDHOUSE_ETL_DIR")
-    if override:
-        return override
-    for candidate in (
-        os.path.join(PONDHOUSE_DIR, "etl"),                        # repo checkout
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "etl"),  # image layout
-    ):
-        if os.path.isdir(candidate):
-            return candidate
-    return os.path.join(PONDHOUSE_DIR, "etl")
+# The ETL modules are top-level scripts in etl/, not an importable package. In the
+# Dagster image they live at /opt/dagster/etl, so PONDHOUSE_ETL_DIR says where.
+ETL_DIR = os.getenv("PONDHOUSE_ETL_DIR", os.path.join(PONDHOUSE_DIR, "etl"))
+sys.path.insert(0, ETL_DIR)
+
+import bronze  # noqa: E402
+import checks  # noqa: E402
+import ingest  # noqa: E402
+import serve  # noqa: E402
+import transform  # noqa: E402
+from config import TABLES  # noqa: E402
+from conn import get_conn  # noqa: E402
 
 
-ETL_DIR = _resolve_etl_dir()
+def _key(layer, table):
+    return dg.AssetKey([layer, table])
 
 
-def _run_etl_module(script, *args, method=None):
-    """Run one of the etl/ scripts and surface its output on failure."""
-    result = subprocess.run(
-        [sys.executable, script, *args],
-        cwd=ETL_DIR, capture_output=True, text=True, check=False,
+def _build_with_con(build):
+    con = get_conn()
+    try:
+        build(con)
+    finally:
+        con.disconnect()
+
+
+# --- Assets ---
+@dg.multi_asset(
+    name="sling_replication",
+    specs=[dg.AssetSpec(_key("ingestion", t), group_name="ingestion") for t in TABLES],
+    description="Sling replication: Postgres (pos) -> parquet on RustFS",
+)
+def sling_replication():
+    ingest.run_sling()
+    for table in TABLES:
+        yield dg.MaterializeResult(asset_key=_key("ingestion", table))
+
+
+def _bronze_asset(table):
+    @dg.asset(key=_key("bronze", table), deps=[_key("ingestion", table)], group_name="bronze")
+    def asset() -> None:
+        _build_with_con(lambda con: bronze.build_table(con, table))
+    return asset
+
+
+def _transform_asset(spec):
+    @dg.asset(
+        key=_key(spec.layer, spec.table),
+        deps=[_key(*dep) for dep in spec.deps],
+        group_name=spec.layer,
     )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"{script} failed (exit {result.returncode}):\n"
-            f"{result.stderr or result.stdout}"
-        )
-    payload = {"status": "success", "output": result.stdout}
-    if method:
-        payload["method"] = method
-    return payload
+    def asset() -> None:
+        _build_with_con(lambda con: transform.build_table(con, spec))
+    return asset
 
 
-# --- Sling Ingestion Asset ---
-@dg.asset(
-    description="Run Sling batch replication: Postgres (pos) -> parquet on RustFS",
-    group_name="ingestion",
-)
-def sling_ingestion() -> dict:
-    """Land the POS tables in s3://lake/ingestion/.
-
-    Dagster runs inside a container with no docker CLI, so driving the Sling
-    container via `docker compose` is not possible from here. When the CLI *is*
-    available (running Dagster on the host) Sling is used; otherwise the asset
-    falls back to the equivalent Ibis/DuckDB ingestion in etl/ingest.py, which
-    needs nothing but network access to Postgres and RustFS.
-    """
-    if shutil.which("docker"):
-        for argv in (
-            ["docker", "compose", "--profile", "tools", "up", "-d", "sling"],
-            ["docker", "compose", "--profile", "tools", "exec", "-T", "sling",
-             "sling", "run", "--home-dir", "/sling",
-             "-r", "/sling/replications/demo-to-lake.yaml"],
-        ):
-            result = subprocess.run(argv, cwd=PONDHOUSE_DIR, check=False,
-                                    capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Sling step failed: {result.stderr}")
-        return {"status": "success", "method": "sling", "output": result.stdout}
-
-    return _run_etl_module("ingest.py", "--method", "custom", "--mode", "merge",
-                           method="ibis")
+def _clickhouse_asset(table, layer):
+    @dg.asset(key=_key("clickhouse", table), deps=[_key(layer, table)], group_name="clickhouse")
+    def asset() -> None:
+        serve.serve_table(table)
+    return asset
 
 
-# --- Bronze Layer Asset ---
-@dg.asset(
-    description="Build bronze Delta tables from the ingestion layer",
-    group_name="transform",
-)
-def bronze_layer(sling_ingestion: dict) -> dict:
-    """Run bronze layer ETL.
-
-    The Sling path lands parquet; the Ibis fallback lands Delta, so the bronze
-    reader has to be told which layout the ingestion layer actually has.
-    """
-    fmt = "parquet" if sling_ingestion.get("method") == "sling" else "delta"
-    return _run_etl_module("bronze.py", "--source-format", fmt)
-
-
-# --- Transform (Silver/Gold/Mart) Asset ---
-@dg.asset(
-    description="Build silver, gold, and mart Delta layers via Ibis",
-    group_name="transform",
-    deps=[bronze_layer],
-)
-def transform_layer() -> dict:
-    """Build the silver, gold and mart Delta layers."""
-    return _run_etl_module("transform.py")
-
-
-# --- Serve (ClickHouse Marts) Asset ---
-@dg.asset(
-    description="Create ClickHouse marts tables reading Delta from RustFS",
-    group_name="serve",
-    deps=[transform_layer],
-)
-def clickhouse_marts() -> dict:
-    """Create the ClickHouse marts tables over the Delta gold + mart layers."""
-    return _run_etl_module("serve.py")
-
-
-# --- Asset Checks ---
-def _run_check(layer):
-    """Run etl/checks.py for a layer. A check that cannot run counts as failed."""
-    result = subprocess.run(
-        [sys.executable, "checks.py", layer],
-        cwd=ETL_DIR, capture_output=True, text=True, check=False,
-    )
-    if result.returncode != 0:
-        return dg.AssetCheckResult(
-            passed=False,
-            metadata={"error": (result.stderr or result.stdout)[-2000:]},
-        )
-    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+# --- Asset checks ---
+def _check_result(run):
+    """A check that cannot run counts as failed, rather than failing the whole run."""
+    try:
+        outcome = run()
+    except Exception as e:
+        return dg.AssetCheckResult(passed=False, metadata={"error": str(e)[-2000:]})
     return dg.AssetCheckResult(
         passed=outcome["passed"],
         metadata={k: dg.MetadataValue.json(v) if isinstance(v, (dict, list)) else v
@@ -142,64 +92,60 @@ def _run_check(layer):
     )
 
 
-@dg.asset_check(asset=sling_ingestion, description="Every source table landed with rows")
-def sling_ingestion_check() -> dg.AssetCheckResult:
-    return _run_check("ingestion")
+def _rows_check(layer, table):
+    @dg.asset_check(asset=_key(layer, table), name="has_rows",
+                    description="The table has rows")
+    def check() -> dg.AssetCheckResult:
+        return _check_result(lambda: checks.run_table_rows(layer, table))
+    return check
 
 
-@dg.asset_check(asset=bronze_layer, description="Every bronze table has rows")
-def bronze_layer_check() -> dg.AssetCheckResult:
-    return _run_check("bronze")
+def _served_check(table):
+    @dg.asset_check(asset=_key("clickhouse", table), name="matches_delta",
+                    description="ClickHouse serves the same row count as the Delta table")
+    def check() -> dg.AssetCheckResult:
+        return _check_result(lambda: checks.run_served_table(table))
+    return check
 
 
 @dg.asset_check(
-    asset=transform_layer,
+    asset=_key("gold", "fact_sales"),
     description="fact_sales is unique, resolves against dims, and reconciles with silver",
 )
 def gold_fact_check() -> dg.AssetCheckResult:
-    return _run_check("gold")
+    return _check_result(lambda: checks.run("gold"))
 
 
-@dg.asset_check(
-    asset=clickhouse_marts,
-    description="ClickHouse serves the same row counts as the Delta tables",
-)
-def clickhouse_marts_check() -> dg.AssetCheckResult:
-    return _run_check("marts")
-
-
-# --- Full Pipeline Job ---
-# An @dg.job body cannot invoke assets: it would wrap clickhouse_marts as a lone
-# op and silently skip ingestion/bronze/transform. define_asset_job materializes
-# the whole asset graph in dependency order instead.
+# --- Job and schedule ---
 pondhouse_pipeline_job = dg.define_asset_job(
     name="pondhouse_pipeline",
     description="Full pondhouse pipeline: ingestion -> bronze -> transform -> serve",
     selection=dg.AssetSelection.all(),
 )
 
-
-# --- Schedule ---
 pondhouse_schedule = dg.ScheduleDefinition(
     job=pondhouse_pipeline_job,
     cron_schedule=os.getenv("ETL_SCHEDULE_CRON", "*/5 * * * *"),
     execution_timezone="UTC",
 )
 
-
 defs = dg.Definitions(
     assets=[
-        sling_ingestion,
-        bronze_layer,
-        transform_layer,
-        clickhouse_marts,
+        sling_replication,
+        *[_bronze_asset(t) for t in TABLES],
+        *[_transform_asset(spec) for spec in transform.TRANSFORMS],
+        *[_clickhouse_asset(t, layer) for t, (layer, _sort_key) in serve.MARTS.items()],
     ],
     asset_checks=[
-        sling_ingestion_check,
-        bronze_layer_check,
+        *[_rows_check("ingestion", t) for t in TABLES],
+        *[_rows_check("bronze", t) for t in TABLES],
         gold_fact_check,
-        clickhouse_marts_check,
+        *[_served_check(t) for t in serve.MARTS],
     ],
     jobs=[pondhouse_pipeline_job],
     schedules=[pondhouse_schedule],
+    # One process for the whole run. A subprocess per step would start Python and
+    # import Ibis about 60 times, which costs far more time and memory than this
+    # small pipeline saves by running in parallel.
+    executor=dg.in_process_executor,
 )

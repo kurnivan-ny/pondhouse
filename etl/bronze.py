@@ -1,23 +1,17 @@
-"""Bronze layer: ingestion -> Delta bronze with metadata.
+"""Bronze layer: Sling's parquet landing -> Delta bronze with metadata.
 
-source_format:
-  "parquet" — Sling landing (s3://lake/ingestion/{table}.parquet)
-  "delta"   — custom ingestion (s3://lake/ingestion/{table})
-
-Adds `_ingested_at` timestamp and writes Delta to s3://lake/bronze/{table}.
+Reads s3://lake/ingestion/{table}.parquet, adds an `_ingested_at` timestamp and writes
+Delta to s3://lake/bronze/{table}.
 """
-import argparse
-import os
-
 import ibis
 
 from config import S3, TABLES
-from conn import get_conn, read_delta, read_parquet, write_delta
+from conn import get_conn, read_parquet, write_delta
 
 
-# Types from sql/00_init.sql. Sling and the custom path land the same data with
-# different types (e.g. decimal(24,6) vs decimal(10,2)), and ClickHouse refuses a
-# table whose files disagree, so bronze fixes one schema whichever path ran.
+# Types from sql/00_init.sql. Sling lands wider types than the source (e.g.
+# decimal(24,6) for decimal(10,2)), so bronze restores them. That keeps every later
+# layer's schema stable.
 SOURCE_SCHEMAS = {
     "stores": {"store_id": "int32", "store_name": "string", "city": "string",
                "country_code": "string"},
@@ -36,23 +30,19 @@ SOURCE_SCHEMAS = {
 }
 
 
-def _read_ingestion(con, table, source_format):
-    path = f"s3://{S3['lake_bucket']}/ingestion/{table}"
-    view = f"ingestion_{table}"
-    if source_format == "delta":
-        return read_delta(con, path, view)
-    return read_parquet(con, f"{path}.parquet", view)
+def build_table(con, table):
+    path = f"s3://{S3['lake_bucket']}/ingestion/{table}.parquet"
+    src = read_parquet(con, path, f"ingestion_{table}").cast(SOURCE_SCHEMAS[table])
+    # One batch-level load timestamp: ibis.now() is transaction-constant,
+    # so every row of a given run shares the same _ingested_at value.
+    write_delta(con, src.mutate(_ingested_at=ibis.now()), "bronze", table)
 
 
-def run_bronze(source_format="parquet"):
+def run_bronze():
     con = get_conn()
     try:
         for table in TABLES:
-            src = _read_ingestion(con, table, source_format).cast(SOURCE_SCHEMAS[table])
-            # One batch-level load timestamp: ibis.now() is transaction-constant,
-            # so every row of a given run shares the same _ingested_at value.
-            bronze = src.mutate(_ingested_at=ibis.now())
-            write_delta(con, bronze, "bronze", table)
+            build_table(con, table)
     finally:
         try:
             con.disconnect()
@@ -60,16 +50,5 @@ def run_bronze(source_format="parquet"):
             pass
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--source-format", choices=["parquet", "delta"],
-        default=os.getenv("BRONZE_SOURCE_FORMAT", "parquet"),
-        help="layout of the ingestion layer (default: parquet, as written by Sling)",
-    )
-    args = parser.parse_args()
-    run_bronze(source_format=args.source_format)
-
-
 if __name__ == "__main__":
-    main()
+    run_bronze()

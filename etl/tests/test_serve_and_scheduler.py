@@ -1,4 +1,4 @@
-"""serve.py statement handling + auth, scheduler cron parsing, endpoint parsing."""
+"""serve.py swap order + auth, scheduler cron parsing, endpoint parsing."""
 import pytest
 
 import config
@@ -6,14 +6,56 @@ import scheduler
 import serve
 
 
-def test_split_statements_drops_comments_and_blanks():
-    sql = "-- a comment\nCREATE DATABASE x;\n\n-- another\nCREATE TABLE y;\n"
-    assert serve.split_statements(sql) == ["CREATE DATABASE x", "CREATE TABLE y"]
+@pytest.fixture
+def statements(monkeypatch):
+    """Record every statement instead of sending it to ClickHouse."""
+    sent = []
+    monkeypatch.setattr(serve, "execute", sent.append)
+    return sent
 
 
-def test_marts_sql_contains_no_credentials():
-    with open(serve.SQL_FILE, encoding="utf-8") as f:
-        assert "secret" not in f.read().lower()
+def _position(statements, prefix):
+    return next(i for i, s in enumerate(statements) if s.startswith(prefix))
+
+
+def test_serve_table_builds_before_it_swaps(statements):
+    serve.serve_table("fact_sales")
+
+    build = _position(statements, "CREATE TABLE marts.fact_sales__new")
+    first_run_target = _position(statements, "CREATE TABLE IF NOT EXISTS marts.fact_sales")
+    swap = _position(statements, "EXCHANGE TABLES marts.fact_sales__new AND marts.fact_sales")
+    cleanup = _position(statements, "DROP TABLE marts.fact_sales__new")
+    assert build < first_run_target < swap < cleanup
+    assert "ENGINE = MergeTree" in statements[build]
+    assert "/lake/gold/fact_sales/" in statements[build]
+
+
+def test_failed_build_never_touches_the_served_table(monkeypatch):
+    sent = []
+
+    def fail_on_build(statement):
+        sent.append(statement)
+        if statement.startswith("CREATE TABLE marts.fact_sales__new"):
+            raise RuntimeError("the lake is unreachable")
+
+    monkeypatch.setattr(serve, "execute", fail_on_build)
+    with pytest.raises(RuntimeError):
+        serve.serve_table("fact_sales")
+
+    assert not any("EXCHANGE" in s for s in sent)
+    assert not any(s.startswith("DROP TABLE marts.fact_sales ") for s in sent)
+
+
+def test_serve_table_clears_a_leftover_from_a_failed_run(statements):
+    serve.serve_table("dim_date")
+    assert (_position(statements, "DROP TABLE IF EXISTS marts.dim_date__new")
+            < _position(statements, "CREATE TABLE marts.dim_date__new"))
+
+
+def test_serving_statements_contain_no_credentials(statements, monkeypatch):
+    monkeypatch.setattr(serve, "CLICKHOUSE_PASSWORD", "s3cret")
+    serve.run_serve()
+    assert not any("s3cret" in s for s in statements)
 
 
 def test_execute_sends_credentials_in_headers_not_the_url(monkeypatch):

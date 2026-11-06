@@ -34,7 +34,7 @@ their own profiles.
 | Viz | Metabase | v0.65.2 | core | 3000 | http://localhost:3000 |
 | Orchestration | Dagster | 1.13 | core | 3001 | http://localhost:3001 |
 | Shared DB + demo source | Postgres (wal_level=logical) | 16 | core | 5433 → 5432 (`POSTGRES_HOST_PORT`) | — |
-| Batch CLI | Sling | 1.6.5 | `tools` | — | `docker compose exec sling ...` |
+| Batch ingestion | Sling (in the `etl` and Dagster images) | see `uv.lock` | `tools` | — | `docker compose --profile tools run --rm etl python ingest.py` |
 | Medallion ETL | Ibis + DuckDB + deltalake | see `uv.lock` | `tools` | — | `docker compose run --rm etl ...` |
 | Monitoring | Beszel (hub + agent) | 0.21.1 | `monitoring` | 8090 | http://localhost:8090 |
 | Governance | OpenMetadata + Elasticsearch | 1.13.3 / 9.3.0 | `governance` | 8585 / 8080 | http://localhost:8585 |
@@ -47,7 +47,6 @@ cp .env.example .env                       # first time only; then edit as neede
 
 docker compose up -d                       # core: rustfs, clickhouse, postgres, metabase, dagster
 docker compose --profile cdc up -d         # + Kafka + Kafka Connect (Debezium + Aiven sink)
-docker compose --profile tools up -d       # + Sling CLI container
 docker compose --profile monitoring up -d  # + Beszel (hub + agent)
 docker compose --profile governance up -d  # + OpenMetadata + Elasticsearch
 ```
@@ -77,7 +76,7 @@ pondhouse/
 ├── orchestration/          # Dagster: image, instance config, assets + asset checks
 │   └── initdb/             # postgres bootstrap: dagster/demo/openmetadata/airflow DBs
 ├── scripts/                # end-to-end smoke tests (pipeline, CDC), also run in CI
-└── serving/                # ClickHouse: bootstrap SQL, config, marts DDL
+└── serving/                # ClickHouse: bootstrap SQL and config
 ```
 
 ## Configuration (.env)
@@ -89,7 +88,6 @@ pondhouse/
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres superuser | `pondhouse` / `pondhouse` / `pondhouse` |
 | `BIND_ADDR` | Interface all ports publish on | `127.0.0.1` |
 | `ETL_SCHEDULE_CRON` | Dagster + APScheduler cadence | `*/5 * * * *` |
-| `SLING_USER` | Sling container `uid:gid` | `1000:1000` |
 | `BESZEL_AGENT_KEY` | Beszel agent auth | *(paste from Beszel UI)* |
 | `OM_VERSION` | OpenMetadata + ingestion image tag | `1.13.3` |
 | `OM_FERNET_KEY` | OpenMetadata secret key; **required** for `governance` | *(generate)* |
@@ -109,6 +107,16 @@ holds a real secret.
   `docker compose down --remove-orphans`. Data volumes are kept.
 - `orchestration/initdb/01_dbs.sh` runs only on a fresh Postgres volume, so existing
   database passwords stay as they are.
+- Rebuild the images: `docker compose build`. Sling is now inside the `etl` and Dagster
+  images, so remove the old container with `docker compose --profile tools down
+  --remove-orphans`. `SLING_USER` is no longer used.
+- `etl.py --ingest`/`--mode` and `bronze.py --source-format` are gone: Sling is the only
+  ingestion path. Delta tables from the old custom path stay at `s3://lake/ingestion/{table}/`
+  unused, and can be deleted once you don't need them.
+- The next `serve.py` or Dagster run replaces each `marts.*` table with a native one. This
+  leaves the lake data untouched, and table and column names stay the same.
+- Dagster now has one asset per table, so old assets such as `bronze_layer` stay in its
+  history but are no longer built.
 
 ## CDC pipeline
 
@@ -152,7 +160,9 @@ schema:
   rows that can't become a sale are kept in `silver.rejected_sales`.
 - **`gold`** — star schema (`dim_customer`/`dim_product`/`dim_store`/`dim_date`, `fact_sales`).
 - **`mart`** — data marts (`daily_sales_mart`, `product_sales_mart`, `customer_sales_mart`).
-- **`marts`** — ClickHouse serving tables (`DeltaLake` engine) created by `etl/serve.py`.
+- **`marts`** — native ClickHouse tables loaded from gold + mart by `etl/serve.py`. Each
+  one is built separately and swapped in atomically, so a failed load leaves the old data
+  serving, and queries keep working if RustFS is down.
 
 Everything runs in Docker — no local Python needed:
 

@@ -67,8 +67,8 @@
 
   <!-- Dagster -->
   <rect x="212" y="378" width="524" height="52" class="card" fill="#f8fafc" stroke="#cbd5e1"/>
-  <text x="474" y="399" class="lbl" fill="#334155" text-anchor="middle">Dagster — asset graph + 5-minute schedule</text>
-  <text x="474" y="417" class="sub" fill="#64748b" text-anchor="middle">sling_ingestion → bronze_layer → transform_layer → clickhouse_marts</text>
+  <text x="474" y="399" class="lbl" fill="#334155" text-anchor="middle">Dagster — one asset per table + 5-minute schedule</text>
+  <text x="474" y="417" class="sub" fill="#64748b" text-anchor="middle">ingestion → bronze → silver → gold → mart → clickhouse</text>
 
   <!-- Flows -->
   <path class="flow" d="M 164 171 H 206"/>

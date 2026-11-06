@@ -19,12 +19,12 @@ on RustFS, computed with Ibis, and served to ClickHouse.
 | Layer | Location | What it is |
 |---|---|---|
 | `pos` | postgres `demo` | source of truth: `stores`, `products`, `customers`, `transactions`, `transaction_items` + `category_ref`, `status_ref`, `country_ref` |
-| `ingestion` | `s3://lake/ingestion/*.parquet` | raw landing (Sling parquet, or custom Delta) |
+| `ingestion` | `s3://lake/ingestion/*.parquet` | raw landing (Sling parquet) |
 | `bronze` | `s3://lake/bronze/*` (Delta) | raw copy + `_ingested_at` |
 | `silver` | `s3://lake/silver/*` (Delta) | **translate** (join refs → names), **cleanse**, **deduplicate**; `rejected_sales` keeps items that can't become a sale |
 | `gold` | `s3://lake/gold/*` (Delta) | star schema: `dim_customer`, `dim_product`, `dim_store`, `dim_date`, `fact_sales` |
 | `mart` | `s3://lake/mart/*` (Delta) | data marts: `daily_sales_mart`, `product_sales_mart`, `customer_sales_mart` |
-| `marts` | ClickHouse | serving tables (`DeltaLake` engine) reading gold + mart from RustFS |
+| `marts` | ClickHouse | native tables loaded from gold + mart, swapped in atomically |
 
 ### Gold star schema
 
@@ -38,17 +38,17 @@ on RustFS, computed with Ibis, and served to ClickHouse.
 |---|---|
 | `sql/00_init.sql` | `pos` schema: source tables + reference lookups + seed data |
 | `generate_data.py` | inserts new POS transactions (manual / scheduler) |
-| `ingest.py` | ingestion: Sling (default) or custom Delta ingestion (`overwrite`/`append`/`merge`) |
+| `ingest.py` | ingestion: runs the Sling replication in `ingestion/sling` |
 | `bronze.py` | ingestion → **bronze** Delta (adds `_ingested_at`) |
 | `transform.py` | **silver** (translate/cleanse/dedup) → **gold** (fact+dim) → **mart** |
-| `serve.py` | creates ClickHouse `marts` tables over the Delta gold + mart layers |
+| `serve.py` | loads native ClickHouse `marts` tables from the Delta gold + mart layers |
 | `checks.py` | data-quality checks, run by Dagster or by hand: `python checks.py gold` |
 | `etl.py` | orchestrator: `ingest → bronze → transform → serve` (`--init` seeds) |
 | `scheduler.py` | APScheduler cron: each cycle generates data + runs the ETL |
-| `conn.py` | Ibis/DuckDB connection helper (S3 Delta, optional Postgres attach) |
+| `conn.py` | Ibis/DuckDB connection helper (S3 Delta) |
 | `config.py` | Postgres + RustFS + cron config (env-overridable) |
 | `Dockerfile` | `runtime` (pipeline only) and `dev` (adds tests, used by `docker compose run --rm etl ...`) targets |
-| `tests/` | pytest suite (transforms, ingest modes, db helpers, backend parity) |
+| `tests/` | pytest suite (transforms, serving, checks, db helpers, backend parity) |
 
 ## Run it (Docker)
 
@@ -63,15 +63,13 @@ docker compose exec -T postgres \
   psql -U pondhouse -d demo -v ON_ERROR_STOP=1 < etl/sql/00_init.sql
 
 # 2. ingestion: postgres -> s3://lake/ingestion/*.parquet
-docker compose --profile tools up -d sling
-docker compose --profile tools exec -T sling \
-  sling run --home-dir /sling -r /sling/replications/demo-to-lake.yaml
+docker compose --profile tools run --rm etl python ingest.py
 
 # 3. bronze -> silver -> gold -> mart  (Delta on RustFS, computed with Ibis)
 docker compose --profile tools run --rm etl python bronze.py
 docker compose --profile tools run --rm etl python transform.py
 
-# 4. expose gold + mart to ClickHouse
+# 4. load gold + mart into ClickHouse
 docker compose --profile tools run --rm etl python serve.py
 ```
 
@@ -81,11 +79,6 @@ Steps 2–4 in one shot:
 docker compose --profile tools run --rm etl python etl.py
 ```
 
-`etl.py` picks the ingestion method automatically (`--ingest auto`, the default):
-Sling when the docker CLI is reachable — which is the case on the host — and the
-equivalent Ibis/DuckDB ingestion inside the container, where there is no docker
-socket. Force one with `--ingest sling` or `--ingest custom`.
-
 Add more source rows and re-run at any time:
 
 ```bash
@@ -94,21 +87,8 @@ docker compose --profile tools run --rm etl python generate_data.py --rows 5
 
 > The `etl` service joins the compose network, so it reaches the other services by
 > name (`postgres`, `rustfs`, `clickhouse`). Running the scripts from your host
-> instead requires `S3_ENDPOINT=http://localhost:9000` and `POSTGRES_PORT=5433`.
-
-## Ingestion modes
-
-`ingest.py --method custom --mode {overwrite,append,merge}` writes the source to a
-Delta `ingestion` layer:
-
-- **overwrite** — replace the ingestion Delta table (default)
-- **append** — append every source row stamped with `_loaded_at`. The ingestion
-  layer keeps a history of copies; silver keeps only the newest copy of each key
-- **merge** — upsert on the table's primary key, so re-runs are idempotent
-
-```bash
-docker compose --profile tools run --rm etl python ingest.py --method custom --mode merge
-```
+> instead requires `S3_ENDPOINT=http://localhost:9000` and `POSTGRES_PORT=5433`, plus the
+> Sling CLI, with hosts in `ingestion/sling/env.yaml` changed to match.
 
 ## Querying the result
 
@@ -160,7 +140,7 @@ docker compose --profile tools run --rm -e CLICKHOUSE_HOST=clickhouse etl \
 ```
 
 `scripts/smoke_test.sh` runs the real pipeline end to end and asserts exact revenue
-in ClickHouse after overwrite, repeated append, and merge. It uses its own compose
+in ClickHouse after a first run, a re-run, Dagster, a new source row and a lake outage. It uses its own compose
 project, volumes and no published ports, so it is safe next to a live stack.
 
 ## Scheduler
@@ -180,10 +160,10 @@ All knobs are env vars with defaults matching `../.env`:
 | `POSTGRES_HOST_PORT` | `5433` | host port mapping (compose only) |
 | `ETL_DB` | `demo` | source database |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` | `pondhouse` | postgres auth |
-| `ETL_ATTACH_PG` | `0` | attach Postgres to DuckDB (only ingestion needs it) |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `pondhouse` / `pondhouse-secret-change-me` | RustFS auth |
 | `S3_ENDPOINT` | `http://localhost:9000` | RustFS endpoint (`http://rustfs:9000` in-network) |
 | `S3_LAKE_BUCKET` | `lake` | lake bucket |
+| `SLING_HOME` | `/opt/sling` in the images | Sling connections + replication |
 | `CLICKHOUSE_HOST` / `CLICKHOUSE_PORT` | `localhost` / `8123` | serve step |
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / `pondhouse` | ClickHouse auth |
 | `ETL_SCHEDULE_CRON` | `*/5 * * * *` | scheduler cadence |
@@ -204,5 +184,10 @@ All knobs are env vars with defaults matching `../.env`:
 - **Asset checks are real.** Each layer has row counts; gold also checks uniqueness,
   foreign keys and revenue against silver; serving compares ClickHouse row counts
   with Delta. A failed check is reported in Dagster but does not stop the run.
-- **Only ingestion touches Postgres.** The lake steps run with no Postgres attach,
-  so bronze/silver/gold/mart still work when the source database is down.
+- **Only ingestion touches Postgres.** Bronze/silver/gold/mart read only the lake, so
+  they still work when the source database is down.
+- **Serving is atomic.** `serve.py` builds each table as `marts.{table}__new`, then swaps
+  it in with `EXCHANGE TABLES`. Each table swaps on its own, so during a run some tables
+  can be one load ahead of others.
+- **Runs do not need the internet.** Sling, its DuckDB and the DuckDB extensions are baked
+  into the images at build time.

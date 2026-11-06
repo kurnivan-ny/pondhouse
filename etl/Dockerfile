@@ -5,6 +5,7 @@
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
+    SLING_HOME=/opt/sling \
     UV_PROJECT_ENVIRONMENT=/usr/local
 
 WORKDIR /app
@@ -16,11 +17,19 @@ RUN pip install --no-cache-dir uv==0.13.7 \
 COPY etl/*.py ./
 COPY etl/sql ./sql
 
-RUN useradd --create-home --uid 1000 etl
+COPY ingestion/sling/env.yaml "$SLING_HOME"/env.yaml
+COPY ingestion/sling/replications "$SLING_HOME"/replications
+
+RUN useradd --create-home --uid 1000 etl \
+    && chown -R etl:etl "$SLING_HOME"
 USER etl
 
-# Bake the DuckDB extensions so runs do not depend on the network.
-RUN python -c "import duckdb; duckdb.sql('INSTALL delta; INSTALL postgres')"
+# Bake everything normally fetched on first use, so runs do not depend on the network:
+# the Sling binary and its DuckDB (a parquet run fetches both) and the DuckDB extensions.
+RUN printf 'a\n1\n' > /tmp/bake.csv \
+    && sling run --home-dir "$SLING_HOME" --src-stream file:///tmp/bake.csv --tgt-object file:///tmp/bake.parquet \
+    && rm /tmp/bake.csv /tmp/bake.parquet \
+    && python -c "import duckdb; duckdb.sql('INSTALL delta; INSTALL httpfs')"
 
 # No default command: the pipeline is invoked explicitly, e.g.
 #   docker compose run --rm etl python etl.py --ingest custom

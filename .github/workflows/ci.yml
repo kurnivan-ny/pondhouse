@@ -141,13 +141,20 @@ jobs:
         if: matrix.name == 'dagster'
         run: docker run --rm --network none pondhouse-dagster:ci python -c "import repo.definitions"
 
-      # Blocking for etl and dagster, which have no findings. Report only for connect:
-      # its findings are libraries bundled in the latest Debezium and Aiven releases.
+      # Always report everything. Block on findings in etl and dagster, except inside the
+      # Sling binary and all of connect: those are libraries compiled or bundled into the
+      # latest upstream releases, which a version bump here cannot fix.
       - name: Trivy scan
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.1 \
-            image --severity HIGH,CRITICAL --ignore-unfixed --no-progress \
-            --exit-code ${{ matrix.name == 'connect' && '0' || '1' }} pondhouse-${{ matrix.name }}:ci
+          scan() {
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
+              aquasec/trivy:0.76.1 image --severity HIGH,CRITICAL --ignore-unfixed --no-progress \
+              "$@" pondhouse-${{ matrix.name }}:ci
+          }
+          scan --exit-code 0
+          if [ "${{ matrix.name }}" != "connect" ]; then
+            scan --exit-code 1 --skip-files '**/.sling/bin/sling/*/sling'
+          fi
 
   audit:
     runs-on: ubuntu-latest

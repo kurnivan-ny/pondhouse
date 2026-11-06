@@ -871,6 +871,7 @@ dependencies = [
     { name = "ibis-framework", extra = ["duckdb"] },
     { name = "psycopg2-binary" },
     { name = "pyarrow" },
+    { name = "sling" },
     { name = "sqlglot" },
 ]
 
@@ -899,6 +900,7 @@ requires-dist = [
     { name = "ibis-framework", extras = ["duckdb"], specifier = ">=12.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pyarrow", specifier = ">=26.0" },
+    { name = "sling", specifier = ">=1.6" },
     { name = "sqlalchemy", marker = "extra == 'orchestration'", specifier = ">=2.0,<2.1" },
     { name = "sqlglot", specifier = "<30.18" },
 ]
@@ -1207,6 +1209,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "sling"
+version = "1.6.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/c3/c2e66fd57b367fcda0f49231d3def79a752bc579caa59510a3ce0ae93a3d/sling-1.6.6.tar.gz", hash = "sha256:bb8c6e10f8ee548e10a6a9f97b388550b61426d823fee756b11b9b3980a8eb33", size = 103987, upload-time = "2026-11-05T13:09:43.74Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/33/5096ec7d89b43b00a039ac20b78ea89cc43f4a8727cab6020dbb961d8e00/sling-1.6.6-py3-none-any.whl", hash = "sha256:c879aff2d7cb9dc2e75804211a85a97773b1b18e8e7fc26fbc99e2a468eee81c", size = 52466, upload-time = "2026-11-05T13:09:42.453Z" },
 ]
 
 [[package]]

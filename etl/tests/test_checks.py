@@ -1,5 +1,6 @@
 """The data-quality checks must pass on good data and fail on bad data."""
 import checks
+import serve
 
 
 def _reader(lake):
@@ -58,8 +59,7 @@ def test_gold_fails_when_revenue_does_not_reconcile(built):
 
 def test_marts_pass_when_counts_match(built):
     read = _reader(built)
-    counts = {t: checks._count(read("gold", t)) for t in checks.GOLD_TABLES}
-    counts.update({t: checks._count(read("mart", t)) for t in checks.MART_TABLES})
+    counts = {t: checks._count(read(layer, t)) for t, (layer, _key) in serve.MARTS.items()}
     assert checks.check_marts(read, counts.__getitem__)["passed"]
 
 
@@ -67,3 +67,16 @@ def test_marts_fail_when_clickhouse_is_behind(built):
     result = checks.check_marts(_reader(built), lambda table: 0)
     assert not result["passed"]
     assert "fact_sales" in result["metadata"]["mismatched"]
+
+
+def test_table_rows_fail_on_one_empty_table(built):
+    empty = built.tables[("bronze", "stores")].limit(0)
+    assert not checks.check_table_rows(lambda _l, _t: empty, "bronze", "stores")["passed"]
+    assert checks.check_table_rows(_reader(built), "bronze", "stores")["passed"]
+
+
+def test_served_table_compares_one_table(built):
+    read = _reader(built)
+    rows = checks._count(read("gold", "fact_sales"))
+    assert checks.check_served_table(read, "fact_sales", lambda _t: rows)["passed"]
+    assert not checks.check_served_table(read, "fact_sales", lambda _t: rows - 1)["passed"]
