@@ -83,6 +83,8 @@ CI (`.github/workflows/ci.yml`) runs lint, tests, all three smoke tests, image b
 - Trivy also ignores the Sling binary when blocking, while still reporting it: it has 42
   HIGH/CRITICAL findings in compiled-in Go libraries on the latest release. Sling runs
   only for ingestion and opens no ports. Recheck on upgrades.
+- Gitleaks scans commits, not the working tree, so a local run before committing misses new
+  files. Run it after committing and before pushing.
 - Metabase v0.65's image bundles the ClickHouse driver (seen in its startup log), so it needs
   no plugin. Connecting it to the marts through the UI has not been tried.
 - Metabase's `MB_DB_FILE=/metabase-data/metabase.db` creates a folder, so the H2 path is
