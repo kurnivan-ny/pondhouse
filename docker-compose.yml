@@ -179,7 +179,7 @@ services:
   metabase:
     mem_limit: 1536m
     restart: unless-stopped
-    image: metabase/metabase:v0.65.2.6
+    image: metabase/metabase:v0.65.3.7
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
