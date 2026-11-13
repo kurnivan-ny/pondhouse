@@ -1,6 +1,6 @@
 # Built from the repository root so that both orchestration/ and etl/ are in
 # the build context (see docker-compose.yml: context: ., dockerfile: orchestration/Dockerfile).
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 ENV DAGSTER_HOME=/opt/dagster/dagster_home \
     PONDHOUSE_ETL_DIR=/opt/dagster/etl \
