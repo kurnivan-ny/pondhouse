@@ -2,7 +2,7 @@
 # Built from the repository root (it needs pyproject.toml + uv.lock). `runtime` is the
 # pipeline alone; `dev` adds the tests and is what the compose `etl` service uses:
 #   docker compose --profile tools run --rm etl python -m pytest tests/ -q
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     SLING_HOME=/opt/sling \
