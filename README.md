@@ -223,6 +223,10 @@ configuring, add the label the workflows look for:
 sudo ./svc.sh install && sudo ./svc.sh start   # needs systemd enabled in WSL; or ./run.sh
 ```
 
+Without `sudo`, run it as a systemd user service instead: a unit in
+`~/.config/systemd/user/` with `ExecStart=%h/actions-runner/run.sh` and `Restart=always`, then
+`systemctl --user enable --now <unit>` and `loginctl enable-linger $USER`.
+
 Its user must be able to run `docker` and read the deployment clone. Your machine has to be
 on for a deploy to happen: jobs wait in the queue for up to a day.
 
@@ -237,6 +241,8 @@ on for a deploy to happen: jobs wait in the queue for up to a day.
 is new, seed it from the deployment clone:
 
 ```bash
+cd ~/pondhouse-prod
+export COMPOSE_PROJECT_NAME=pondhouse   # without this, compose starts a second stack
 export COMPOSE_FILE=docker-compose.yml:docker-compose.deploy.yml
 export PONDHOUSE_VERSION="$(cat .deployed-version)"
 docker compose exec -T postgres psql -U pondhouse -d demo -v ON_ERROR_STOP=1 < etl/sql/00_init.sql
@@ -492,6 +498,12 @@ things, as both are libraries inside the latest upstream releases. Recheck them 
 - `TRANSFORMS` in `etl/transform.py` declares each table's reads, and Dagster orders assets from
   it. A unit test fails if a declaration differs from what the code reads.
 
+**Compose**
+- Shell variables override `.env`. If a shell has `CLICKHOUSE_PASSWORD` exported, running
+  `docker compose` there recreates ClickHouse with that password, while other services read
+  the real one from `.env`, and serving fails with `AUTHENTICATION_FAILED`. Fix it by unsetting
+  the variable and running `docker compose up -d clickhouse`. The deploy runner isn't affected.
+
 **Tooling**
 - Gitleaks scans commits, not the working tree, so run it after committing and before pushing.
 - `docker manifest inspect` gave false negatives here. Test an image with a real `docker pull`,
@@ -502,7 +514,7 @@ things, as both are libraries inside the latest upstream releases. Recheck them 
 **Not verified**
 - The `governance` and `monitoring` profiles have never been run, only their compose config.
 - Connecting Metabase to the marts through its UI. Its image does bundle the ClickHouse driver.
-- The deploy job on a real self-hosted runner.
+- A real Slack or Discord webhook. Alerts are tested against a local test webhook.
 
 ## Overlapping components (by design)
 
