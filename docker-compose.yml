@@ -22,7 +22,7 @@ services:
   rustfs:
     mem_limit: 512m
     restart: unless-stopped
-    image: rustfs/rustfs:1.0.4
+    image: rustfs/rustfs:1.0.6
     environment:
       # rustfs admin credentials (minio-compatible)
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
