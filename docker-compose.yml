@@ -299,7 +299,7 @@ services:
 
   # ---------------- Monitoring: Beszel (profile: monitoring) ----------------
   beszel:
-    image: henrygd/beszel:0.21.1
+    image: henrygd/beszel:0.21.2
     profiles: ["monitoring"]
     restart: unless-stopped
     ports:
