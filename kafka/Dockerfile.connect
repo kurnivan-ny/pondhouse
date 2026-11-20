@@ -9,7 +9,7 @@ RUN unzip /tmp/s3.zip -d /tmp \
     && mv /tmp/s3-sink-connector-for-apache-kafka-${AIVEN_S3_VERSION} /aiven-s3-sink
 
 # Debezium publishes to quay.io; this tag is not available on Docker Hub.
-FROM quay.io/debezium/connect:3.7.0.Final
+FROM quay.io/debezium/connect:3.7.1.Final
 # Only Postgres is used; the other bundled connectors just add vulnerable libraries.
 RUN find /kafka/connect -mindepth 1 -maxdepth 1 ! -name debezium-connector-postgres -exec rm -rf {} +
 COPY --from=plugins /aiven-s3-sink /kafka/connect/aiven-s3-sink
