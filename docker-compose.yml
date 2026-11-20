@@ -310,7 +310,7 @@ services:
       - "host.docker.internal:host-gateway"   # lets the hub reach the agent
 
   beszel-agent:
-    image: henrygd/beszel-agent:0.21.1
+    image: henrygd/beszel-agent:0.21.2
     profiles: ["monitoring"]
     restart: unless-stopped
     network_mode: host   # accurate host CPU/RAM/net/disk stats
